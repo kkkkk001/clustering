@@ -5,6 +5,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import pdb
+from torch_geometric.nn import DMoNPooling, GCNConv
+
+from torch_geometric.nn.models.mlp import MLP
+
 
 
 class encoding(nn.Module):
@@ -112,7 +116,46 @@ class cluster_model(nn.Module):
         else:
             return F.softmax(self.cluster_assi, dim=1)
 
-        
+
+class low_pass_model(nn.Module):
+    # H_0 = MLP(X) or H_0 = linear(X)
+    # H = \sum_{i=1}^{L} \alpha_i A^i H_0 W
+    def __init__(self, args, low_pass_filter, input_dim, hidden_dim):
+        super(low_pass_model, self).__init__()
+        self.args = args
+        self.low_pass_filter = low_pass_filter
+        if args.first_transformation=='mlp':
+            self.lin1 = MLP([input_dim, hidden_dim])
+        elif args.first_transformation=='linear':
+            self.lin1 = nn.Linear(input_dim, hidden_dim)
+        else:
+            raise NotImplementedError
+        self.lin2 = nn.Linear(hidden_dim, hidden_dim)
+
+    def forward(self, X):
+        H_0 = self.lin1(X)
+        H = self.low_pass_filter @ H_0
+        H = self.lin2(H)
+        return H
+
+
+
+class pool_based_model(nn.Module):
+    def __init__(self, args, input_dim, hidden_dim, cluster_num, low_pass_filter):
+        super(pool_based_model, self).__init__()
+        self.args = args
+        # self.encoding = low_pass_model(args, low_pass_filter, input_dim, hidden_dim)
+        self.encoding = GCNConv(input_dim, hidden_dim)
+        self.dmon_pool = DMoNPooling(hidden_dim, cluster_num)
+    
+    def forward(self, X, A, edge_index):
+        # H = self.encoding(X)
+        H = self.encoding(X, edge_index)
+        s, out, out_adj, spectral_loss, ortho_loss, cluster_loss = self.dmon_pool(H, A)
+        # remove the dimension for graph level
+        return s[0], out[0], out_adj[0], spectral_loss, ortho_loss, cluster_loss
+
+
 def kmeans_loss_fn(H, C):
     cluster_centroid_embedding = C.T @ H
     loss = 0

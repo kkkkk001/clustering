@@ -52,6 +52,8 @@ X, y, A = load_graph_data(root_path='/home/kxie/cluster/dataset/',
 cluster_num = len(np.unique(y))
 
 A = torch.FloatTensor(A).to(args.device)
+edge_index = torch.LongTensor(np.array(A.nonzero())).to(args.device)
+pdb.set_trace()
 A = normalize_adj_torch(A, self_loop=True, symmetry=True)
 low_pass_filter = construct_filter(A, l=args.low_pass_layers, 
                                     alpha=args.low_pass_alpha)
