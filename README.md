@@ -13,5 +13,7 @@ python test_dmon.py --encoder low_pass
 test DGCluster:
 
 cd DGClustter
+
 python mian.py --dataset cora --device cuda:0 --lam 0 --encoder GCN
+
 python mian.py --dataset cora --device cuda:0 --lam 0 --encoder low_pass
