@@ -162,7 +162,18 @@ class pool_based_model(nn.Module):
         return s[0], out[0], out_adj[0], spectral_loss, ortho_loss, cluster_loss
 
 
-def kmeans_loss_fn(H, C):
+def kmeans_loss_fn(H, C, args):
+    if args.kmeans_loss == 'tr':
+        return kmeans_trace_loss_fn(H, C)
+    elif args.kmeans_loss == 'cen':
+        return kmeans_centroid_contrastive_loss_fn(H, C, args)
+    elif args.kmeans_loss == 'nod':
+        return kmeans_node_contrastive_loss_fn(H, C)
+    else:
+        raise NotImplementedError
+
+
+def kmeans_trace_loss_fn(H, C):
     cluster_centroid_embedding = C.T @ H
     loss = 0
     for i in range(C.shape[1]):
@@ -170,16 +181,44 @@ def kmeans_loss_fn(H, C):
     return loss/C.shape[0]/C.shape[1]
 
 
-def kmeans_contrastive_loss_fn(H, C):
-    # pos: node represen
-    pass
-
-
-def kmeans_centroid_loss_fn(H, C, args):
-    # pos: node representation & its cluster centroid
-    # neg: node representation & other cluster centroids
+def kmeans_centroid_contrastive_loss_fn(H, C, args):
+    # pos: node representation vs. its cluster centroid
+    # neg: node representation vs. other cluster centroids
     cluster_centroid_embedding = C.T @ H
+    sim = torch.einsum("nd, cd -> nc", H, cluster_centroid_embedding)
+    labels = torch.argmax(C, dim=1)
+    return F.cross_entropy(sim, labels) 
+
+
+def kmeans_node_contrastive_loss_fn(H, C, num_neg_samples):
+    # pos: nodes in the same cluster
+    # neg: nodes in different clusters
+
+    labels = torch.argmax(C, dim=1)
+    num_nodes = H.shape[0]
     loss = 0
+
+    for i in range(num_nodes):
+        target_label = labels[i]
+        pos_indices = torch.where(labels == target_label)[0]
+        neg_indices = torch.where(labels != target_label)[0]
+
+        # 随机选择一个正样本
+        pos_index = pos_indices[torch.randperm(pos_indices.size(0))[0]]
+        pos_sample = H[pos_index]
+
+        # 随机选择 num_neg_samples 个负样本
+        neg_indices = neg_indices[torch.randperm(neg_indices.size(0))[:num_neg_samples]]
+        neg_samples = H[neg_indices]
+
+        # 计算 InfoNCE loss
+        pos_sim = torch.dot(H[i], pos_sample)
+        neg_sim = torch.matmul(H[i], neg_samples.T)
+        logits = torch.cat([pos_sim.unsqueeze(0), neg_sim])
+        targets = torch.zeros(logits.shape[0], dtype=torch.long, device=H.device)
+        loss += F.cross_entropy(logits, targets)
+
+    return loss / num_nodes
 
 
 def spectral_loss_fn(C, A):

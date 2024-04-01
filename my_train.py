@@ -40,6 +40,8 @@ parser.add_argument('--cluster_init_method', type=str, default='kmeans', help='r
 parser.add_argument('--loss_lambda1', type=float, default=1, help='')
 parser.add_argument('--loss_lambda2', type=float, default=1, help='')
 parser.add_argument('--reg_loss', type=str, default='orth', help='orth(ogonal), col(lapse), sqrt')
+parser.add_argument('--kmeans_loss', type=str, default='tr', 
+                    help='tr(ace), cen(troid contrastive), nod(e contrastive)')
 
 parser.add_argument('--pretrain_epochs', type=int, default=100, help='')
 parser.add_argument('--pretrain_lr', type=float, default=1e-3, help='')
@@ -51,9 +53,8 @@ X, y, A = load_graph_data(root_path='/home/kxie/cluster/dataset/',
                           dataset_name=args.dataset, show_details=True)
 cluster_num = len(np.unique(y))
 
-A = torch.FloatTensor(A).to(args.device)
 edge_index = torch.LongTensor(np.array(A.nonzero())).to(args.device)
-pdb.set_trace()
+A = torch.FloatTensor(A).to(args.device)
 A = normalize_adj_torch(A, self_loop=True, symmetry=True)
 low_pass_filter = construct_filter(A, l=args.low_pass_layers, 
                                     alpha=args.low_pass_alpha)
@@ -102,6 +103,7 @@ def train():
     # H_init = A
     cluster = cluster_model(args.cluster_init_method, H_init.shape[0], args.hidden_dim, cluster_num, H_init).to(args.device)
     optimizer_C = torch.optim.Adam(cluster.parameters(), lr=args.C_lr)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer_C, step_size=10, gamma=0.1)
 
     print('#'*20, "Initial Clustering", '#'*20)
     cluster_ids = torch.argmax(cluster(H_init), dim=1)
@@ -115,37 +117,28 @@ def train():
     best_acc = 0
     best_res = []
     for e in range(args.epochs):
+        if e < 200:
+            scheduler.step()
+        if e == 200:
+            args.loss_lambda1 *= 1.5
+            args.loss_lambda2 *= 1.5
+
         optimizer_C.zero_grad()
         optimizer_H.zero_grad()
 
         H = model(X, A)
         C = cluster(H)
         # if args.cluster_init_method == 'mlp':
-        loss1 = kmeans_loss_fn(H, C)
+        loss1 = kmeans_loss_fn(H, C, args)
         loss2 = args.loss_lambda1 * spectral_loss_fn(C, A)
         loss3 = args.loss_lambda2 * reg_loss_fn(C, args)
         loss = loss1 + loss2 + loss3
         loss.backward()
         optimizer_H.step()
         optimizer_C.step()
-        # else:
-        #     ## fix C and update H
-        #     loss2 = kmeans_loss_fn(H, C.detach())
-        #     loss2.backward()
-        #     optimizer_H.step()
-
-
-        #     ## fix H and update C
-        #     loss11 = kmeans_loss_fn(H.detach(), C)
-        #     loss12 = args.loss_lambda1 * spectral_loss_fn(C, A)
-        #     loss13 = args.loss_lambda2 * reg_loss_fn(C, args)
-        #     loss1 = loss11 + loss12 + loss13
-        #     loss1.backward()
-        #     optimizer_C.step()
-
 
         ## evaluation
-        print('epoch: %d' % e, end=' ')
+        print('epoch: %d, loss1: %.4f, loss2: %.4f, loss3: %.4f' % (e, loss1, loss2, loss3), end=' ')
         predict_labels = torch.argmax(C, dim=1)
         res = print_eval(predict_labels.cpu().numpy(), true_labels.cpu().numpy(), A.cpu().numpy())
 
