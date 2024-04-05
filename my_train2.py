@@ -10,7 +10,6 @@ from dgc.clustering import k_means
 from dgc.eval import print_eval
 from dgc.rand import setup_seed
 from datetime import datetime
-from torch_geometric.nn import GCNConv
 setup_seed(42)
 torch.autograd.set_detect_anomaly(True)
 print('start time:', datetime.now())
@@ -23,12 +22,17 @@ parser.add_argument('--hidden_dim', type=int, default=64, help="hidden dimension
 parser.add_argument('--epochs', type=int, default=500, help='Number of epochs to train.')
 parser.add_argument('--H_lr', type=float, default=1e-3, help='Initial learning rate.')
 parser.add_argument('--C_lr', type=float, default=1e-3, help='Initial learning rate.')
-parser.add_argument('--device', type=str, default='cuda:0', help='device')
+parser.add_argument('--device', type=str, default='cpu:0', help='device')
 
 parser.add_argument('--first_transformation', type=str, default='mlp', help='mlp or linear')
 
-parser.add_argument('--low_pass_layers', type=int, default=5, help='')
-parser.add_argument('--low_pass_alpha', type=float, default=1, help='')
+parser.add_argument('--low_pass_layers', type=int, default=10, help='')
+parser.add_argument('--alphaH', type=float, default=1.0, help='')
+parser.add_argument('--alphaC', type=float, default=0.5, help='')
+parser.add_argument('--alphaO', type=float, default=0.5, help='')
+parser.add_argument('--step_size_gamma', type=float, default=0.005, help='')
+
+
 parser.add_argument('--high_pass_layers', type=int, default=5, help='')
 parser.add_argument('--high_pass_alpha', type=float, default=1, help='')
 
@@ -36,16 +40,22 @@ parser.add_argument('--fusion_method', type=str, default='add', help='add, conca
 parser.add_argument('--fusion_beta', type=float, default=0.5, help='')
 parser.add_argument('--fusion_gamma', type=float, default=1, help='')
 
+parser.add_argument('--dropout', type=float, default=0.1, help='')
+parser.add_argument('--gamma', type=float, default=0.5, help='')
+
 parser.add_argument('--cluster_init_method', type=str, default='kmeans', help='random, kmeans, mlp')
 
-parser.add_argument('--loss_lambda1', type=float, default=1, help='')
-parser.add_argument('--loss_lambda2', type=float, default=1, help='')
+parser.add_argument('--loss_lambda_adj', type=float, default=1.0, help='')
+parser.add_argument('--loss_lambda_attr', type=float, default=1.0, help='')
+parser.add_argument('--loss_lambda_kmeans', type=float, default=0.1, help='')
 parser.add_argument('--reg_loss', type=str, default='orth', help='orth(ogonal), col(lapse), sqrt')
 parser.add_argument('--kmeans_loss', type=str, default='tr', 
                     help='tr(ace), cen(troid contrastive), nod(e contrastive)')
+parser.add_argument('--temperature', type=float, default=1, help='') 
 
 parser.add_argument('--pretrain_epochs', type=int, default=100, help='')
 parser.add_argument('--pretrain_lr', type=float, default=1e-3, help='')
+
 
 
 args = parser.parse_args()
@@ -55,15 +65,13 @@ X, y, A = load_graph_data(root_path='/home/kxie/cluster/dataset/',
 cluster_num = len(np.unique(y))
 
 edge_index = torch.LongTensor(np.array(A.nonzero())).to(args.device)
-assert (A==A.T).all()
-eigenvalues, eigenvectors = np.linalg.eigh(A)
-eigenvectors = eigenvectors[:, (-eigenvalues).argsort()[:cluster_num]]
-eigenvectors = torch.FloatTensor(eigenvectors).to(args.device)
+
 
 A = torch.FloatTensor(A).to(args.device)
+org_adj = A
 A = normalize_adj_torch(A, self_loop=True, symmetry=True)
 low_pass_filter = construct_filter(A, l=args.low_pass_layers, 
-                                    alpha=args.low_pass_alpha)
+                                    alpha=args.alphaH)
 
 X = torch.FloatTensor(X).to(args.device)
 y = torch.LongTensor(y).to(args.device)
@@ -71,81 +79,74 @@ true_labels = y
 
 
 def train():
-    model = encoding(args, X.shape[1], args.hidden_dim, 
-                    low_pass_filter).to(args.device)
-    # model = GCN(X.shape[1], args.hidden_dim, args.gnnlayers).to(args.device)
+    model = encoding3(args, X.shape[1], args.hidden_dim, A, cluster_num).to(args.device)
     optimizer_H = torch.optim.Adam(model.parameters(), lr=args.H_lr)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer_H, milestones=[50, 100, 150], gamma=0.5)
 
-    ##### pretrained model #####
-    if args.fusion_method == 'concat':
-        # the out dimension of H is 2*hidden_dim because of concat op
-        decoder = nn.Linear(args.hidden_dim*2, X.shape[1]).to(args.device)
-    else:
-        decoder = nn.Linear(args.hidden_dim, X.shape[1]).to(args.device)
-    # wrap parameters from model and decoder
-    optimizer_pretrain = torch.optim.Adam(list(model.parameters()) + 
-                                        list(decoder.parameters()), 
-                                        lr=args.pretrain_lr)
-    for e in range(args.pretrain_epochs):
-        optimizer_pretrain.zero_grad()
-        H = model(X, A)
-        # reconstruct adj matrix A with H
-        loss1 = reconstruction_loss_distance(torch.mm(H, H.T), A)/A.shape[0]
-        # reconstruct feature matrix X with decoder(H)
-        loss2 = reconstruction_loss_cosine(decoder(H), X)/X.shape[0]
-        loss = loss2
-        loss.backward()
-        optimizer_pretrain.step()
-        print('PRETRAIN - epoch: %d, loss1: %.2f, loss2: %.2f' % (e, loss1.item(), loss2.item()), end=' ')
-        
-        # evaluate the quality of the learned representation with kmeans
-        cluster_ids,_ = k_means(H.detach(), cluster_num, device='gpu', distance='cosine')
-        print_eval(cluster_ids, true_labels.cpu().numpy(), A.cpu().numpy())
-    ##############################
+    X_norm = F.normalize(X, p=2, dim=1)
+    X_prop = X_norm
+    for _ in range(args.low_pass_layers):
+        X_prop = args.alphaH * torch.spmm(A, X_prop) + X_norm
+
+    U, S, _ = torch.svd_lowrank(X_prop, q=args.hidden_dim, niter=7)
+    X_prop = U @ torch.diag(S)
+    X_prop = F.normalize(X_prop, p=2, dim=1)
+
+    cluster_ids,_ = k_means(X_prop.detach(), cluster_num, device='cpu', distance='cosine')
+    C = torch.zeros(X_prop.shape[0], cluster_num).to(args.device)
+    C[torch.arange(X_prop.shape[0]), cluster_ids] = 1
+    C = F.normalize(C, p=2, dim=0)
+    C0 = C
+    # for _ in range(args.low_pass_layers):
+    #     C = args.alphaC * torch.spmm(A, C) + C0
+
+    for _ in range(args.low_pass_layers):
+        C = DeProp(C, C0, A, args.step_size_gamma, args.alphaC, args.alphaO)
+        C = F.normalize(C, p=2, dim=1)
 
 
-    H_init = model(X, A).detach()
-    # H_init = model.fusion(model.low_pass_filter@X, model.high_pass_filter@X).detach()
-    # H_init = A
-    cluster = cluster_model(args.cluster_init_method, H_init.shape[0], args.hidden_dim, cluster_num, H_init).to(args.device)
-    optimizer_C = torch.optim.Adam(cluster.parameters(), lr=args.C_lr)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer_C, step_size=10, gamma=0.1)
-
-    print('#'*20, "Initial Clustering", '#'*20)
-    cluster_ids = torch.argmax(cluster(H_init), dim=1)
-    initres = print_eval(cluster_ids.cpu().numpy(), true_labels.cpu().numpy(), A.cpu().numpy())
-    print('#'*60)
-
-
-
+    predict_labels = torch.argmax(C, dim=1)
+    res = print_eval(predict_labels.cpu().numpy(), true_labels.cpu().numpy(), A.cpu().numpy())
 
     ##### train #####
     best_acc = 0
     best_res = []
     for e in range(args.epochs):
-        if e < 200:
-            scheduler.step()
-        if e == 200:
-            args.loss_lambda1 *= 1.5
-            args.loss_lambda2 *= 1.5
-
-        optimizer_C.zero_grad()
+        # optimizer_C.zero_grad()
         optimizer_H.zero_grad()
+        if e > 50:
+            scheduler.step()
 
-        H = model(X, A)
-        # C = construct_filter(torch.mm(H, H.T), l=1, alpha=args.low_pass_alpha)
-        # C = torch.mm(F.normalize(C), eigenvectors)
-        C = cluster(H)
-        loss1 = kmeans_loss_fn(H, C, args)
-        loss2 = args.loss_lambda1 * spectral_loss_fn(C, A)
-        loss3 = args.loss_lambda2 * reg_loss_fn(C, args)
-        loss = loss1 + loss2 + loss3
+        H = model(X, edge_index)
+
+        loss_prop = F.mse_loss(H @ H.T, X_prop @ X_prop.T)
+        # loss_prop = F.mse_loss(H, X_prop)
+        loss_adj = args.loss_lambda_adj * F.mse_loss(H @ H.T, org_adj)
+        loss_attr = args.loss_lambda_attr * F.mse_loss(H @ H.T, X_norm @ X_norm.T)
+
+        loss_kmeans = args.loss_lambda_kmeans * kmeans_loss_fn(C, H, args)
+        
+        loss = loss_prop + loss_kmeans
         loss.backward()
         optimizer_H.step()
-        optimizer_C.step()
+
+        # evaluate the quality of the learned representation with kmeans
+        # H = F.normalize(H, p=2, dim=1)
+        cluster_ids,_ = k_means(H.detach(), cluster_num, device='cpu', distance='cosine')
+        # print_eval(cluster_ids, true_labels.cpu().numpy(), A.cpu().numpy())
+        C = torch.zeros(H.shape[0], cluster_num).to(H.device)
+        C[torch.arange(H.shape[0]), cluster_ids] = 1
+        C = F.normalize(C, p=2, dim=0)
+        C = F.softmax(C, dim=1)
+
+        # C0 = C
+        # for _ in range(args.low_pass_layers):
+        #     C = args.alphaC * torch.spmm(A, C) + C0
+
+        C = F.softmax(C, dim=1)
 
         ## evaluation
-        print('epoch: %d, loss1: %.4f, loss2: %.4f, loss3: %.4f' % (e, loss1, loss2, loss3), end=' ')
+        print('epoch: %d , loss: %.2f, loss_kmeans: %.2f, loss_prop: %.2f, loss_adj: %.2f, loss_attr: %.2f' % (e, loss.item(), loss_kmeans.item(), loss_prop, loss_adj.item(), loss_attr.item()), end=' ')
         predict_labels = torch.argmax(C, dim=1)
         res = print_eval(predict_labels.cpu().numpy(), true_labels.cpu().numpy(), A.cpu().numpy())
 
@@ -172,7 +173,7 @@ for fold in range(5):
     print('fold: %d, acc: %.2f, nmi: %.2f, ari: %.2f, f1: %.2f, mod: %.2f, con: %.2f' % (fold, res[0]*100, res[1]*100, res[2]*100, res[3]*100, res[4]*100, res[5]*100))
 
 # save the result
-with open('/home/kxie/cluster/res_log/my_model.txt', 'a+') as f:
+with open('./res_log/my_model.txt', 'a+') as f:
     total_res = np.array(total_res)
     f.write('%s, %.2f+-%.2f, %.2f+-%.2f, %.2f+-%.2f, %.2f+-%.2f, %.2f+-%.2f, %.2f+-%.2f\n'%(args.dataset, 
         total_res[:, 0].mean()*100, total_res[:, 0].std()*100, 

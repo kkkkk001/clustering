@@ -8,7 +8,141 @@ import pdb
 from torch_geometric.nn import DMoNPooling, GCNConv
 
 from torch_geometric.nn.models.mlp import MLP
+from typing import Optional, Tuple
+from torch_geometric.nn import Linear
+from math import log
+from torch.nn import ModuleList
+from torch import Tensor
 
+import torch_geometric.transforms as T
+from torch_geometric.datasets import Planetoid
+from torch_geometric.logging import init_wandb, log
+from torch_geometric.nn import GCNConv
+
+
+from torch_geometric.typing import Adj, OptTensor
+from torch_sparse import SparseTensor, matmul
+from torch_geometric.nn.conv import MessagePassing
+from torch_geometric.nn.dense.linear import Linear
+from torch_geometric.nn.inits import zeros
+from torch.nn import Parameter
+from torch_geometric.nn.conv.gcn_conv import gcn_norm
+
+
+class DeProp_Prop(MessagePassing):
+
+    _cached_edge_index: Optional[Tuple[Tensor, Tensor]]
+    _cached_adj_t: Optional[SparseTensor]
+
+    def __init__(self, in_channels: int, out_channels: int, lambda1: float, lambda2: float, gamma: float,
+                 improved: bool = False,  cached: bool = True,
+                 add_self_loops: bool = True, normalize: bool = True,
+                 bias: bool = True, **kwargs):
+
+        super(DeProp_Prop, self).__init__(aggr='add', **kwargs)
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.improved = improved
+        self.cached = cached
+        self.add_self_loops = add_self_loops
+        self.normalize = normalize
+        self.lambda1 = lambda1
+        self.lambda2 = lambda2
+        self.gamma = gamma
+        self._cached_edge_index = None
+        self._cached_adj_t = None
+        self.lin = Linear(in_channels, out_channels, bias=False,
+                          weight_initializer='glorot')
+
+        if bias:
+            self.bias = Parameter(torch.Tensor(out_channels))
+        else:
+            self.register_parameter('bias', None)
+
+        self.reset_parameters()
+
+
+    def reset_parameters(self):
+        self.lin.reset_parameters()
+        zeros(self.bias)
+        self._cached_edge_index = None
+        self._cached_adj_t = None
+
+
+    def forward(self, x: Tensor, edge_index: Adj,
+                edge_weight: OptTensor = None) -> Tensor:
+        """"""
+
+        if self.normalize:
+            if isinstance(edge_index, Tensor):
+                cache = self._cached_edge_index
+                if cache is None:
+                    edge_index, edge_weight = gcn_norm(  # yapf: disable
+                        edge_index, edge_weight, x.size(self.node_dim),
+                        self.improved, self.add_self_loops)
+                    if self.cached:
+                        self._cached_edge_index = (edge_index, edge_weight)
+                else:
+                    edge_index, edge_weight = cache[0], cache[1]
+
+            elif isinstance(edge_index, SparseTensor):
+                cache = self._cached_adj_t
+                if cache is None:
+                    edge_index = gcn_norm(  # yapf: disable
+                        edge_index, edge_weight, x.size(self.node_dim),
+                        self.improved, self.add_self_loops)
+                    if self.cached:
+                        self._cached_adj_t = edge_index
+                else:
+                    edge_index = cache
+
+        x = self.lin(x)
+        z = (1 - self.gamma * self.lambda1 + self.gamma * self.lambda2) * x
+        s = self.gamma * self.lambda1 * self.propagate(edge_index, x=x, edge_weight=edge_weight,
+                              size=None)
+        t = self.gamma * self.lambda2 * x @ (x.t() @ x)
+        out = z + s - t
+
+        if self.bias is not None:
+            out += self.bias
+
+        return out
+
+
+    def message(self, x_j: Tensor, edge_weight: OptTensor) -> Tensor:
+        return x_j if edge_weight is None else edge_weight.view(-1, 1) * x_j
+
+
+    def message_and_aggregate(self, adj_t: SparseTensor, x: Tensor) -> Tensor:
+        return matmul(adj_t, x, reduce=self.aggr)
+
+
+    def __repr__(self):
+        return '{}(lambda1={}, lambda2={}, gamma={})'.format(
+            self.__class__.__name__, self.lambda1, self.lambda2, self.gamma)
+
+
+class GCN(torch.nn.Module):
+    def __init__(self, in_channels, hidden_channels, n_layers=2):
+        super().__init__()
+        self.fc = nn.Linear(in_channels, hidden_channels)
+        self.convs = nn.ModuleList()
+        for _ in range(n_layers-1):
+            self.convs.append(GCNConv(hidden_channels, hidden_channels))
+        self.last_conv = GCNConv(hidden_channels, hidden_channels)
+        
+
+    def forward(self, x, edge_index, edge_weight=None):
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = self.fc(x).relu()
+        for conv in self.convs:
+            x = F.dropout(x, p=0.5, training=self.training)
+            x = conv(x, edge_index, edge_weight).relu()
+
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = self.last_conv(x, edge_index, edge_weight)
+        return x
 
 
 class encoding(nn.Module):
@@ -79,6 +213,136 @@ class encoding(nn.Module):
         return H
 
 
+
+class encoding2(nn.Module):
+    def __init__(self, args, input_dim, hidden_dim, norm_adj, cluster_num):
+        super(encoding2, self).__init__()
+        self.args = args
+
+        if args.first_transformation=='mlp':
+            self.first_layer = nn.Sequential(nn.Linear(input_dim, hidden_dim), 
+                                             nn.ReLU(),
+                                             nn.Linear(hidden_dim, hidden_dim))
+        elif args.first_transformation=='linear':
+            self.first_layer = nn.Linear(input_dim, hidden_dim)
+        else:
+            raise NotImplementedError
+        
+        self.norm_adj = norm_adj
+        self.cluster_num = cluster_num
+
+        self.lins = ModuleList()
+        for i in range(self.args.low_pass_layers):
+            self.lins.append(Linear(in_channels = hidden_dim, out_channels = hidden_dim, bias = True, weight_initializer = 'glorot'))
+
+        self.low_pass_fc  = nn.Linear(hidden_dim, hidden_dim)
+        self.high_pass_fc = nn.Linear(hidden_dim, hidden_dim)
+
+        self.final_layer = Linear(in_channels = hidden_dim, out_channels = hidden_dim, bias = True, weight_initializer = 'glorot')
+
+        self.cluster_layer = Linear(in_channels = hidden_dim, out_channels = self.cluster_num, bias = True, weight_initializer = 'glorot')
+        #nn.Sequential(nn.Linear(hidden_dim, hidden_dim), 
+                                             # nn.ReLU(),
+                                             # nn.Linear(hidden_dim, self.cluster_num))
+
+        if args.fusion_method == 'concat':
+            self.fusion_fc = nn.Linear(2*hidden_dim, 2*hidden_dim)
+            # self.fusion_param = nn.Parameter(torch.FloatTensor(2*hidden_dim, 2*hidden_dim))
+            # self.last_layer = nn.Linear(2*hidden_dim, output_dim)
+        elif args.fusion_method == 'add' or args.fusion_method == 'max':
+            self.fusion_fc = nn.Linear(hidden_dim, hidden_dim)
+            # self.fusion_param = nn.Parameter(torch.FloatTensor(hidden_dim, hidden_dim))
+            # self.last_layer = nn.Linear(hidden_dim, output_dim)
+        else:
+            raise NotImplementedError
+    
+        
+
+    def construct_high_pass_adj(self, H_0):
+        H_0_norm = F.normalize(H_0, p=2, dim=1)
+        pair_wise_cos = torch.mm(H_0_norm, H_0_norm.t())
+        pair_wise_cos = pair_wise_cos * (self.norm_adj!=0)
+        return F.relu(pair_wise_cos)
+    
+
+    def fusion(self, H_low, H_high):
+        if self.args.fusion_method == 'add':
+            H =  self.args.fusion_beta * H_low + (1-self.args.fusion_beta) * H_high
+        elif self.args.fusion_method == 'concat':
+            H = torch.cat((self.args.fusion_beta*H_low, (1-self.args.fusion_beta)*H_high), dim=1)
+        elif self.args.fusion_method == 'max':
+            H = torch.max(H_low, H_high)
+        else:
+            raise NotImplementedError
+        return H
+    
+
+    def forward(self, X, mask: Optional[Tensor] = None):
+        H_0 = self.first_layer(X)
+        # self.high_pass_adj = normalize_adj_torch(self.construct_high_pass_adj(H_0))
+        # self.high_pass_filter = construct_filter(adj=self.high_pass_adj, 
+                                                 # l=self.args.high_pass_layers, 
+                                                 # alpha=self.args.high_pass_alpha)
+        H = H_0
+        for i in range(self.args.low_pass_layers):
+            # temp = torch.mm(H_0.t(), H)
+            # temp = torch.mm(H_0, temp)
+            # DeProp(H, H_0, self.norm_adj, self.args.step_size_gamma, self.args.alphaH, self.args.alphaO)
+            # H = F.normalize(H, p=2, dim=1)
+            H = self.args.alphaH * torch.spmm(self.norm_adj, H) + H_0
+            # H = F.normalize(H, p=2, dim=1)
+
+
+
+            # H_low = self.alpha*self.norm_adj(H_low) + H_0
+
+            # theta = log(self.args.gamma / (i + 2))
+            # H = (1 - theta) * H + theta * self.lins[i].forward(H)
+            # H = H + self.lins[i].forward(H)
+            # H = F.dropout(H, p = self.args.dropout, training = self.training, inplace = True)
+            # H = F.relu(H, inplace = True)
+            # H = F.selu(H, inplace = True)
+
+        # self.H_high = self.high_pass_fc(self.high_pass_filter @ H_0)
+        # H = self.fusion(self.H_low, self.H_high)        
+
+        # H = H + self.args.fusion_gamma * self.fusion_fc(H)
+        H = self.final_layer(H)
+        # H = F.dropout(H, p = self.args.dropout, training = self.training, inplace = True)
+        H = F.normalize(H, p=2, dim=1)
+
+        
+        return H
+
+
+class encoding3(nn.Module):
+    def __init__(self, args, input_dim, hidden_dim, norm_adj, cluster_num):
+        super(encoding3, self).__init__()
+        self.args = args
+        self.norm_adj = norm_adj
+        self.cluster_num = cluster_num
+        self.convs = nn.ModuleList()
+        self.convs.append(DeProp_Prop(input_dim, hidden_dim, args.alphaH, args.alphaO, args.step_size_gamma))
+        for _ in range(self.args.low_pass_layers-1):
+            self.convs.append(DeProp_Prop(hidden_dim, hidden_dim, args.alphaH, args.alphaO, args.step_size_gamma))
+        self.fc = nn.Linear(hidden_dim, cluster_num)
+
+        self.dropout = args.dropout
+
+    def forward(self, x, edge_index, mask: Optional[Tensor] = None):
+        for i, conv in enumerate(self.convs):
+            x = F.dropout(x, p=self.dropout, training=self.training)
+            x = conv(x, edge_index)
+            x = F.relu(x)
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.fc(x)
+
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        return F.log_softmax(x, dim=1)
+
+
+
+    
 
 class cluster_model(nn.Module):
     def __init__(self, method, node_num, hidden_dim, cluster_num, H):
@@ -186,6 +450,7 @@ def kmeans_centroid_contrastive_loss_fn(H, C, args):
     # neg: node representation vs. other cluster centroids
     cluster_centroid_embedding = C.T @ H
     sim = torch.einsum("nd, cd -> nc", H, cluster_centroid_embedding)
+    sim /= args.temperature
     labels = torch.argmax(C, dim=1)
     return F.cross_entropy(sim, labels) 
 
@@ -250,3 +515,10 @@ def reconstruction_loss_cosine(A, B, beta=1):
     A = F.normalize(A, p=2, dim=1)
     B = F.normalize(B, p=2, dim=1)
     return torch.pow(1 - torch.sum(A*B, dim=1), beta).sum()
+
+
+def DePropagate(C, C0, A, gamma, alphaC, alphaO):
+    z =  (1 - gamma * alphaC + gamma * alphaO) * C
+    s = gamma * alphaC * torch.spmm(A, C)
+    t = gamma * alphaO * C @ (C.t() @ C)
+    return z+s-t+C0
