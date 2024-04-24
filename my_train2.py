@@ -79,7 +79,7 @@ true_labels = y
 
 
 def train():
-    model = encoding3(args, X.shape[1], args.hidden_dim, A, cluster_num).to(args.device)
+    model = encoding2(args, X.shape[1], args.hidden_dim, A, cluster_num).to(args.device)
     optimizer_H = torch.optim.Adam(model.parameters(), lr=args.H_lr)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer_H, milestones=[50, 100, 150], gamma=0.5)
 
@@ -100,9 +100,9 @@ def train():
     # for _ in range(args.low_pass_layers):
     #     C = args.alphaC * torch.spmm(A, C) + C0
 
-    for _ in range(args.low_pass_layers):
-        C = DeProp(C, C0, A, args.step_size_gamma, args.alphaC, args.alphaO)
-        C = F.normalize(C, p=2, dim=1)
+    # for _ in range(args.low_pass_layers):
+    #     C = DeProp(C, C0, A, args.step_size_gamma, args.alphaC, args.alphaO)
+    #     C = F.normalize(C, p=2, dim=1)
 
 
     predict_labels = torch.argmax(C, dim=1)

@@ -25,10 +25,12 @@ def k_means(embedding, k, device="cpu", distance="euclidean"):
     - cluster centers
     """
     if device == "cpu":
+        if isinstance(embedding, torch.Tensor):
+            embedding = embedding.cpu().numpy()
         model = KMeans(n_clusters=k, n_init=20)
         cluster_id = model.fit_predict(embedding)
         center = model.cluster_centers_
-    if device == "gpu":
+    if device == "gpu" or 'cuda' in device:
         # if embedding is not torch tensor, convert it to torch tensor
         if not isinstance(embedding, torch.Tensor):
             embedding = torch.tensor(embedding).to("cuda")

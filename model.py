@@ -289,7 +289,10 @@ class encoding2(nn.Module):
             # temp = torch.mm(H_0, temp)
             # DeProp(H, H_0, self.norm_adj, self.args.step_size_gamma, self.args.alphaH, self.args.alphaO)
             # H = F.normalize(H, p=2, dim=1)
-            H = self.args.alphaH * torch.spmm(self.norm_adj, H) + H_0
+
+            # H = self.args.alphaH * torch.spmm(self.norm_adj, H) + H_0
+            # H = (1-self.args.alphaH) * torch.spmm(self.norm_adj, H) + self.args.alphaH * H_0
+            H = DePropagate(H, H_0, self.norm_adj, self.args.step_size_gamma, self.args.alphaH, self.args.alphaO)
             # H = F.normalize(H, p=2, dim=1)
 
 
@@ -454,6 +457,24 @@ def kmeans_centroid_contrastive_loss_fn(H, C, args):
     labels = torch.argmax(C, dim=1)
     return F.cross_entropy(sim, labels) 
 
+# TODO: implement this function
+def density_estimation(H, C, args):
+    return
+    # concentration estimation (phi)        
+    density = np.zeros(k)
+    for i,dist in enumerate(Dcluster):
+        if len(dist)>1:
+            d = (np.asarray(dist)**0.5).mean()/np.log(len(dist)+10)            
+            density[i] = d     
+            
+    #if cluster only has one point, use the max to estimate its concentration        
+    dmax = density.max()
+    for i,dist in enumerate(Dcluster):
+        if len(dist)<=1:
+            density[i] = dmax 
+
+    density = density.clip(np.percentile(density,10),np.percentile(density,90)) #clamp extreme values for stability
+    density = args.temperature*density/density.mean()  #scale the mean to temperature 
 
 def kmeans_node_contrastive_loss_fn(H, C, num_neg_samples):
     # pos: nodes in the same cluster
@@ -521,4 +542,4 @@ def DePropagate(C, C0, A, gamma, alphaC, alphaO):
     z =  (1 - gamma * alphaC + gamma * alphaO) * C
     s = gamma * alphaC * torch.spmm(A, C)
     t = gamma * alphaO * C @ (C.t() @ C)
-    return z+s-t+C0
+    return z + s - t + gamma*C0
