@@ -10,7 +10,7 @@ from .kmeans_gpu import kmeans
 from sklearn.cluster import KMeans
 
 
-def k_means(embedding, k, device="cpu", distance="euclidean"):
+def k_means(embedding, k, device="cpu", distance="euclidean", centers='k-means++'):
     """
     K-means algorithm
     :param embedding: embedding of clustering
@@ -27,7 +27,10 @@ def k_means(embedding, k, device="cpu", distance="euclidean"):
     if device == "cpu":
         if isinstance(embedding, torch.Tensor):
             embedding = embedding.cpu().numpy()
-        model = KMeans(n_clusters=k, n_init=20)
+        if isinstance(centers, str):
+            model = KMeans(n_clusters=k, n_init=20)
+        else:
+            model = KMeans(n_clusters=k, init=centers, n_init=1)
         cluster_id = model.fit_predict(embedding)
         center = model.cluster_centers_
     if device == "gpu" or 'cuda' in device:

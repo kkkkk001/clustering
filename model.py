@@ -29,100 +29,6 @@ from torch.nn import Parameter
 from torch_geometric.nn.conv.gcn_conv import gcn_norm
 
 
-class DeProp_Prop(MessagePassing):
-
-    _cached_edge_index: Optional[Tuple[Tensor, Tensor]]
-    _cached_adj_t: Optional[SparseTensor]
-
-    def __init__(self, in_channels: int, out_channels: int, lambda1: float, lambda2: float, gamma: float,
-                 improved: bool = False,  cached: bool = True,
-                 add_self_loops: bool = True, normalize: bool = True,
-                 bias: bool = True, **kwargs):
-
-        super(DeProp_Prop, self).__init__(aggr='add', **kwargs)
-
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.improved = improved
-        self.cached = cached
-        self.add_self_loops = add_self_loops
-        self.normalize = normalize
-        self.lambda1 = lambda1
-        self.lambda2 = lambda2
-        self.gamma = gamma
-        self._cached_edge_index = None
-        self._cached_adj_t = None
-        self.lin = Linear(in_channels, out_channels, bias=False,
-                          weight_initializer='glorot')
-
-        if bias:
-            self.bias = Parameter(torch.Tensor(out_channels))
-        else:
-            self.register_parameter('bias', None)
-
-        self.reset_parameters()
-
-
-    def reset_parameters(self):
-        self.lin.reset_parameters()
-        zeros(self.bias)
-        self._cached_edge_index = None
-        self._cached_adj_t = None
-
-
-    def forward(self, x: Tensor, edge_index: Adj,
-                edge_weight: OptTensor = None) -> Tensor:
-        """"""
-
-        if self.normalize:
-            if isinstance(edge_index, Tensor):
-                cache = self._cached_edge_index
-                if cache is None:
-                    edge_index, edge_weight = gcn_norm(  # yapf: disable
-                        edge_index, edge_weight, x.size(self.node_dim),
-                        self.improved, self.add_self_loops)
-                    if self.cached:
-                        self._cached_edge_index = (edge_index, edge_weight)
-                else:
-                    edge_index, edge_weight = cache[0], cache[1]
-
-            elif isinstance(edge_index, SparseTensor):
-                cache = self._cached_adj_t
-                if cache is None:
-                    edge_index = gcn_norm(  # yapf: disable
-                        edge_index, edge_weight, x.size(self.node_dim),
-                        self.improved, self.add_self_loops)
-                    if self.cached:
-                        self._cached_adj_t = edge_index
-                else:
-                    edge_index = cache
-
-        x = self.lin(x)
-        z = (1 - self.gamma * self.lambda1 + self.gamma * self.lambda2) * x
-        s = self.gamma * self.lambda1 * self.propagate(edge_index, x=x, edge_weight=edge_weight,
-                              size=None)
-        t = self.gamma * self.lambda2 * x @ (x.t() @ x)
-        out = z + s - t
-
-        if self.bias is not None:
-            out += self.bias
-
-        return out
-
-
-    def message(self, x_j: Tensor, edge_weight: OptTensor) -> Tensor:
-        return x_j if edge_weight is None else edge_weight.view(-1, 1) * x_j
-
-
-    def message_and_aggregate(self, adj_t: SparseTensor, x: Tensor) -> Tensor:
-        return matmul(adj_t, x, reduce=self.aggr)
-
-
-    def __repr__(self):
-        return '{}(lambda1={}, lambda2={}, gamma={})'.format(
-            self.__class__.__name__, self.lambda1, self.lambda2, self.gamma)
-
-
 class GCN(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, n_layers=2):
         super().__init__()
@@ -213,7 +119,6 @@ class encoding(nn.Module):
         return H
 
 
-
 class encoding2(nn.Module):
     def __init__(self, args, input_dim, hidden_dim, norm_adj, cluster_num):
         super(encoding2, self).__init__()
@@ -290,8 +195,8 @@ class encoding2(nn.Module):
             # DeProp(H, H_0, self.norm_adj, self.args.step_size_gamma, self.args.alphaH, self.args.alphaO)
             # H = F.normalize(H, p=2, dim=1)
 
-            # H = self.args.alphaH * torch.spmm(self.norm_adj, H) + H_0
-            # H = (1-self.args.alphaH) * torch.spmm(self.norm_adj, H) + self.args.alphaH * H_0
+            H = self.args.alphaH * torch.spmm(self.norm_adj, H) + H_0
+            H = (1-self.args.alphaH) * torch.spmm(self.norm_adj, H) + self.args.alphaH * H_0
             H = DePropagate(H, H_0, self.norm_adj, self.args.step_size_gamma, self.args.alphaH, self.args.alphaO)
             # H = F.normalize(H, p=2, dim=1)
 
@@ -318,31 +223,96 @@ class encoding2(nn.Module):
         return H
 
 
-class encoding3(nn.Module):
-    def __init__(self, args, input_dim, hidden_dim, norm_adj, cluster_num):
-        super(encoding3, self).__init__()
-        self.args = args
-        self.norm_adj = norm_adj
-        self.cluster_num = cluster_num
-        self.convs = nn.ModuleList()
-        self.convs.append(DeProp_Prop(input_dim, hidden_dim, args.alphaH, args.alphaO, args.step_size_gamma))
-        for _ in range(self.args.low_pass_layers-1):
-            self.convs.append(DeProp_Prop(hidden_dim, hidden_dim, args.alphaH, args.alphaO, args.step_size_gamma))
-        self.fc = nn.Linear(hidden_dim, cluster_num)
+class attr_agg(nn.Module):
+    def __init__(self, X, alpha, hop, input_dim, hidden_dim, attr_r):
+        super(attr_agg, self).__init__()
+        X_n = F.normalize(X, p=2, dim=1)
+        attr_simi_mtx = (X_n@X_n.t()).to(X.device)
 
-        self.dropout = args.dropout
 
-    def forward(self, x, edge_index, mask: Optional[Tensor] = None):
-        for i, conv in enumerate(self.convs):
-            x = F.dropout(x, p=self.dropout, training=self.training)
-            x = conv(x, edge_index)
-            x = F.relu(x)
-        x = F.dropout(x, p=self.dropout, training=self.training)
-        x = self.fc(x)
+        row, col = torch.nonzero(attr_simi_mtx, as_tuple=True)
+        values = attr_simi_mtx[row, col]
+        _, sort_indices = torch.sort(values, descending=True)
 
-        x = F.dropout(x, p=self.dropout, training=self.training)
-        return F.log_softmax(x, dim=1)
+        keep_size = int(attr_r * len(sort_indices))
+        sort_indices = sort_indices[:keep_size]
 
+        values = values[sort_indices]
+        # values = torch.ones_like(values[sort_indices])
+        row = row[sort_indices]
+        col = col[sort_indices]
+        attr_simi_mtx = torch.sparse_coo_tensor(torch.stack((row, col),0), values, attr_simi_mtx.shape)
+        attr_simi_mtx = attr_simi_mtx.to_dense()
+
+
+        I = torch.eye(attr_simi_mtx.shape[0]).to(X.device)
+        attr_filter = torch.eye(attr_simi_mtx.shape[0]).to(X.device)
+        for _ in range(hop):
+            attr_filter = alpha * attr_simi_mtx @ attr_filter + I
+        self.attr_filter = attr_filter
+
+        self.fc = nn.Linear(input_dim, hidden_dim)
+
+        
+    def forward(self, x):
+        x = F.normalize(x, p=2, dim=1)
+        x = self.fc(self.attr_filter @ x)
+        x = F.normalize(x, p=2, dim=1)
+        
+        return x
+
+
+class fusion(nn.Module):
+    def __init__(self, fusion_method, fusion_beta):
+        super(fusion, self).__init__()
+        self.fusion_method = fusion_method
+        self.fusion_beta = fusion_beta
+
+    def forward(self, H_low, H_high):
+        H_low = self.fusion_beta * H_low
+        H_high = (1-self.fusion_beta) * H_high
+
+        if self.fusion_method == 'add':
+            H =  H_low + H_high
+        elif self.fusion_method == 'concat':
+            H = torch.cat((H_low, H_high), dim=1)
+        elif self.fusion_method == 'max':
+            H = torch.max(H_low, H_high)
+        else:
+            raise NotImplementedError
+        
+        return H
+
+
+class attr_agg2(nn.Module):
+    def __init__(self, X, alpha, hop, input_dim, hidden_dim):
+        super(attr_agg2, self).__init__()
+        self.fc = nn.Linear(input_dim, hidden_dim)
+    def forward(self, x):
+        return self.fc(x)
+
+class hetero_agg(nn.Module):
+    def __init__(self, alpha, hop, A):
+        super(hetero_agg, self).__init__()
+
+        self.alpha = alpha
+        self.hop = hop
+        self.A = A
+
+    def forward(self, C, H):
+        A_hetero = self.A - C@C.t()
+        A_hetero = F.relu(A_hetero)
+        A_hetero = (A_hetero + A_hetero.t())/2
+
+        L_hetero = torch.eye(A_hetero.shape[0]).to(C.device)
+        L_hetero = L_hetero * A_hetero.sum(axis=1) - A_hetero
+
+        I = torch.eye(L_hetero.shape[0]).to(C.device)
+        filter_hetero = torch.eye(L_hetero.shape[0]).to(C.device)
+        for _ in range(self.hop):
+            filter_hetero = self.alpha * filter_hetero @ L_hetero + I
+        H = F.normalize(filter_hetero @ H, p=2, dim=1)
+        return H
 
 
     
@@ -429,6 +399,14 @@ class pool_based_model(nn.Module):
         return s[0], out[0], out_adj[0], spectral_loss, ortho_loss, cluster_loss
 
 
+def SSG_CCA_loss_fn(H1, H2):
+    loss1 = F.mse_loss(H1, H2)
+    loss2 = F.mse_loss(H1.t() @ H1, torch.eye(H1.shape[1]).to(H1.device))
+    loss3 = F.mse_loss(H2.t() @ H2, torch.eye(H2.shape[1]).to(H2.device))
+    loss = loss1 + 0.1*(loss2 + loss3)
+    return loss
+
+
 def kmeans_loss_fn(H, C, args):
     if args.kmeans_loss == 'tr':
         return kmeans_trace_loss_fn(H, C)
@@ -459,9 +437,13 @@ def kmeans_centroid_contrastive_loss_fn(H, C, args):
 
 # TODO: implement this function
 def density_estimation(H, C, args):
-    return
     # concentration estimation (phi)        
-    density = np.zeros(k)
+    Dcluster = []
+    for i in range(C.shape[1]):
+        Dcluster.append((H[torch.argmax(C, dim=1)==i] - H[torch.argmax(C, dim=1)==i].mean(1)).norm(p=2, dim=1).list())
+    
+    
+    density = np.zeros(C.shape[1])
     for i,dist in enumerate(Dcluster):
         if len(dist)>1:
             d = (np.asarray(dist)**0.5).mean()/np.log(len(dist)+10)            
