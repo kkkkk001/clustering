@@ -20,6 +20,8 @@ print('start time:', datetime.now())
 from utils import cluster_id2assignment, Cprop
 cos_sim = nn.CosineSimilarity(dim=1, eps=1e-6)
 from sklearn.metrics import accuracy_score, f1_score
+from sklearn.cluster import KMeans
+
 
 
 parser = argparse.ArgumentParser(description='my_model')
@@ -54,7 +56,7 @@ parser.add_argument('--gnnlayers', type=int, default=5, help="Number of gnn laye
 parser.add_argument('--step_size_gamma', type=float, default=0.005, help='')
 parser.add_argument('--lambda1', type=float, default=100, help="")
 parser.add_argument('--lambda2', type=float, default=0.03, help="")
-parser.add_argument('--with_bn', type=strtobool, default=True, help="")
+parser.add_argument('--with_bn', type=strtobool, default=False, help="")
 parser.add_argument('--F_norm', type=strtobool, default=True, help="")
 parser.add_argument('--lin', type=strtobool, default=True, help="")
 
@@ -68,7 +70,10 @@ parser.add_argument('--loss_lambda_kmeans', type=float, default=0.1, help='')
 # parser.add_argument('--reg_loss', type=str, default='orth', help='orth(ogonal), col(lapse), sqrt')
 parser.add_argument('--kmeans_loss', type=str, default='tr', 
                     help='tr(ace), cen(troid contrastive), nod(e contrastive)')
-parser.add_argument('--loss_lambda_SSG', type=float, default=0.1, help='')
+parser.add_argument('--loss_lambda_SSG0', type=float, default=0.001, help='')
+parser.add_argument('--loss_lambda_SSG1', type=float, default=0.01, help='')
+parser.add_argument('--loss_lambda_SSG2', type=float, default=0.01, help='')
+parser.add_argument('--loss_lambda_SSG3', type=float, default=0.01, help='')
 parser.add_argument('--temperature', type=float, default=1, help='') 
 
 
@@ -115,6 +120,9 @@ A = normalize_adj_torch(A, self_loop=True, symmetry=True)
 X = torch.FloatTensor(X).to(args.device)
 y = torch.LongTensor(y).to(args.device)
 true_labels = y.cpu().numpy()
+true_labels_onehot = np.zeros((len(true_labels), cluster_num))
+true_labels_onehot[np.arange(len(true_labels)), true_labels] = 1
+true_CCT = true_labels_onehot @ true_labels_onehot.T
 
 
 def train():
@@ -127,15 +135,23 @@ def train():
         optimizer_H.zero_grad()
         H_t = model(X, edge_index)
         H_a = attr_model(X)
-        inter_view_loss = args.loss_lambda_SSG * SSG_CCA_loss_fn(H_t, H_a)
+
+        inter_view_loss0 = args.loss_lambda_SSG0 * (ortho_loss_fn(H_t) + ortho_loss_fn(H_a))
+        inter_view_loss1 = args.loss_lambda_SSG1 * SSG_CCA_loss_fn(H_t, H_a)
+        inter_view_loss2 = args.loss_lambda_SSG2 * node_t_neighbor_a_loss_fn(H_t, H_a, A)
+        if e > 0:
+            inter_view_loss3 = args.loss_lambda_SSG3 * node_t_cluster_a_loss_fn(H_t, H_a, C, simi)
+        else:
+            inter_view_loss3 = torch.tensor(0.0).to(args.device)
+        inter_view_loss = inter_view_loss0 + inter_view_loss1 + inter_view_loss2 + inter_view_loss3
+
         H = fusion_attr(H_t, H_a)
 
         # loss_prop = F.mse_loss(H @ H.T, X_prop @ X_prop.T)
         loss_prop = args.loss_lambda_prop * torch.pow(1 - cos_sim(H, X_prop), args.sharpening).mean()
         # loss_prop = F.mse_loss(H, X_prop)
-        loss_adj = args.loss_lambda_adj * F.mse_loss(H @ H.T, org_adj)
-        loss_attr = args.loss_lambda_attr * F.mse_loss(H @ H.T, X_norm @ X_norm.T)
-
+        # loss_adj = args.loss_lambda_adj * F.mse_loss(H @ H.T, org_adj)
+        # loss_attr = args.loss_lambda_attr * F.mse_loss(H @ H.T, X_norm @ X_norm.T)
 
         # evaluate the quality of the learned representation with kmeans
         # if e == 0:
@@ -156,11 +172,22 @@ def train():
 
 
         ## evaluation
-        print('epoch: %d , loss: %.2f, loss_kmeans: %.2f, loss_prop: %.2f, loss_SSG: %.2f, loss_adj: %.2f, loss_attr: %.2f' % (e, loss.item(), loss_kmeans.item(), loss_prop, inter_view_loss.item(), loss_adj.item(), loss_attr.item()), end=' ')
+        print('epoch: %d , loss: %.2f, loss_kmeans: %.2f, loss_prop: %.2f, ort_loss: %.2f, loss_SSG1: %.2f, loss_SSG2: %.2f, loss_SSG3: %.2f' % (e, loss.item(), loss_kmeans.item(), loss_prop, inter_view_loss0.item(), inter_view_loss1.item(), inter_view_loss2.item(),inter_view_loss3.item()), end=' ')
         predict_labels = torch.argmax(C, dim=1)
         res = print_eval(predict_labels.cpu().numpy(), true_labels, A.cpu().numpy())
-        
-        # # compute the distance between the node and the cluster center
+        centers = torch.FloatTensor(centers).to(args.device)
+        simi = (H.detach() * centers[predict_labels]).sum(dim=1)
+        # find the largest x-th entry in simi, x = 0.2*len(simi)
+        th = torch.sort(simi, descending=True)[0][int(0.2*len(simi))]
+        simi[simi < th] = 0
+        simi[simi >= th] = 1
+        # print(simi.mean().item(), simi.max().item(), simi.min().item())
+
+        simi_t = (H_t.detach() * centers[predict_labels]).sum(dim=1)
+        simi_a = (H_a.detach() * centers[predict_labels]).sum(dim=1)
+
+
+        # compute the distance between the node and the cluster center
         # predict_values, predict_labels = torch.max(C, dim=1)
         # predict_labels = predict_labels.cpu().numpy()
         # selected_centers = centers[predict_labels]
@@ -203,13 +230,12 @@ def train():
         # print('%.4f, %.4f' % (accuracy_score(predict_labels[sorted_indices][:50], true_labels[sorted_indices][:50]), 
         #       accuracy_score(predict_labels[sorted_indices][50:], true_labels[sorted_indices][50:])))
 
-
+        
         ## best acc
         if res[0] > best_acc:
             best_acc = res[0]
             best_res = res
             best_e = e
-
 
     print(f'best epoch: {best_e}')
     return best_res
@@ -219,6 +245,7 @@ def train():
 total_res = []
 # final result is the mean of 5 repeated experiments
 for fold in range(5):
+    setup_seed(42+fold)
     print("#"*60)
     print("#"*26, ' fold:%d ' % fold, "#"*26)
     print("#"*60)
@@ -238,6 +265,7 @@ for fold in range(5):
     # fusion_hetero = fusion(args.fusion_method, args.fusion_beta).to(args.device)
     
     optimizer_H = torch.optim.Adam(list(model.parameters()) + list(attr_model.parameters()), lr=args.H_lr)
+    # optimizer_H = torch.optim.SGD(list(model.parameters()) + list(attr_model.parameters()), lr=args.H_lr)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer_H, milestones=[50, 100, 150], gamma=0.5)
 
 
@@ -251,13 +279,6 @@ for fold in range(5):
     X_prop = F.normalize(X_prop, p=2, dim=1)
 
 
-    ##### test the clustering quality on initial X_prop #####
-    cluster_ids,centers = k_means(X_prop.detach(), cluster_num, device=args.device, distance='cosine')
-    C = cluster_id2assignment(cluster_ids, cluster_num).to(args.device)
-    predict_labels_X_prop = torch.argmax(C, dim=1)
-    print_eval(predict_labels_X_prop.cpu().numpy(), true_labels, A.cpu().numpy())    
-
-
     ##### test the clustering quality on initial X #####
     cluster_ids,_ = k_means(X, cluster_num, device=args.device, distance='cosine')
     C = cluster_id2assignment(cluster_ids, cluster_num).to(args.device)
@@ -265,6 +286,11 @@ for fold in range(5):
     print_eval(predict_labels_X.cpu().numpy(), true_labels, A.cpu().numpy())   
 
 
+    ##### test the clustering quality on initial X_prop #####
+    cluster_ids,centers = k_means(X_prop.detach(), cluster_num, device=args.device, distance='cosine')
+    C = cluster_id2assignment(cluster_ids, cluster_num).to(args.device)
+    predict_labels_X_prop = torch.argmax(C, dim=1)
+    print_eval(predict_labels_X_prop.cpu().numpy(), true_labels, A.cpu().numpy())    
 
     ##### training and evaluation #####
     res = train()
@@ -278,9 +304,9 @@ for fold in range(5):
 with open(args.log_file, 'a+') as f:
     # if the file is empty, write the header
     if os.path.getsize(args.log_file) == 0:
-        f.write('H_lr, loss_lambda_kmeans, gnnlayers, with_bn, F_norm, lin, step_size_gamma, lambda1, lambda2, dropout, ')
+        f.write('loss_lambda_kmeans, cprop_layers, cprop_alpha, SSG0, SSG1, SSG2, SSG3, ')
         f.write('dataset, acc_mean, acc_std, nmi_mean, nmi_std, ari_mean, ari_std, f1_mean, f1_std, mod_mean, mod_std, con_mean, con_std\n')
-    f.write(', '.join([str(x) for x in [args.H_lr, args.loss_lambda_kmeans, args.gnnlayers, args.with_bn, args.F_norm, args.lin, args.step_size_gamma, args.lambda1, args.lambda2, args.dropout]])+', ')
+    f.write(', '.join([str(x) for x in [args.loss_lambda_kmeans, args.cprop_layers, args.cprop_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3]])+', ')
     total_res = np.array(total_res)
     f.write('%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n'%(args.dataset, 
         total_res[:, 0].mean()*100, total_res[:, 0].std()*100, 
@@ -298,5 +324,7 @@ print('%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2
     total_res[:, 3].mean()*100, total_res[:, 3].std()*100, 
     total_res[:, 4].mean()*100, total_res[:, 4].std()*100, 
     total_res[:, 5].mean()*100, total_res[:, 5].std()*100))
+
+print(total_res)
 
 print('end time:', datetime.now())

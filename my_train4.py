@@ -29,15 +29,25 @@ parser = argparse.ArgumentParser(description='my_model')
 parser.add_argument('--dataset', type=str, default='cora', help="name of dataset")
 parser.add_argument('--hidden_dim', type=int, default=64, help="hidden dimension")
 parser.add_argument('--epochs', type=int, default=300, help='Number of epochs to train.')
-parser.add_argument('--H_lr', type=float, default=1e-3, help='Initial learning rate.')
+parser.add_argument('--t_lr', type=float, default=1e-3, help='Initial learning rate.')
+parser.add_argument('--a_lr', type=float, default=1e-3, help='Initial learning rate.')
 parser.add_argument('--device', type=str, default='cuda:0', help='device')
 parser.add_argument('--dropout', type=float, default=0.0, help='')
+
+### top_agg params ###
+parser.add_argument('--top_layers', type=int, default=5, help='')
+parser.add_argument('--top_alpha', type=float, default=0.5, help='')
+parser.add_argument('--top_prop', type=str, default='sgc', help='sgc style, gcn style, appnp style, or deprop style')
+parser.add_argument('--top_linear_trans', type=int, default=1, help='1 for linear transformation, 0 for mlp transformation')
+
 
 
 ### attr_agg params ###
 parser.add_argument('--attr_layers', type=int, default=5, help='')
 parser.add_argument('--attr_alpha', type=float, default=0.5, help='')
 parser.add_argument('--attr_r', type=float, default=0.5, help='the nnz ratio of attr simi mtx')
+parser.add_argument('--attr_prop', type=str, default='sgc', help='sgc style, gcn style, or appnp style')
+parser.add_argument('--attr_linear_trans', type=int, default=1, help='1 for linear transformation, 0 for mlp transformation')
 parser.add_argument('--fusion_method', type=str, default='add', help='add, concat, max')
 parser.add_argument('--fusion_beta', type=float, default=0.5, help='H = beta * H_t + (1-beta) * H_a')
 
@@ -118,6 +128,7 @@ A = torch.FloatTensor(A).to(args.device)
 org_adj = A
 A = normalize_adj_torch(A, self_loop=True, symmetry=True)
 X = torch.FloatTensor(X).to(args.device)
+X_norm = F.normalize(X, p=2, dim=1)
 y = torch.LongTensor(y).to(args.device)
 true_labels = y.cpu().numpy()
 true_labels_onehot = np.zeros((len(true_labels), cluster_num))
@@ -131,21 +142,26 @@ def train():
     best_res = []
     
     cnt = np.zeros(X.shape[0])
+    beta = args.fusion_beta * torch.ones(X.shape[0],1).to(args.device)
     for e in range(args.epochs):
-        optimizer_H.zero_grad()
-        H_t = model(X, edge_index)
-        H_a = attr_model(X)
+        optimizer_t.zero_grad()
+        optimizer_a.zero_grad()
+        if args.top_prop == 'deprop':
+            H_t = model(UX, edge_index)
+        else:
+            H_t = model(UX)
+        H_a = attr_model(UA_norm)
 
         inter_view_loss0 = args.loss_lambda_SSG0 * (ortho_loss_fn(H_t) + ortho_loss_fn(H_a))
         inter_view_loss1 = args.loss_lambda_SSG1 * SSG_CCA_loss_fn(H_t, H_a)
         inter_view_loss2 = args.loss_lambda_SSG2 * node_t_neighbor_a_loss_fn(H_t, H_a, A)
         if e > 0:
             inter_view_loss3 = args.loss_lambda_SSG3 * node_t_cluster_a_loss_fn(H_t, H_a, C, simi)
+            # inter_view_loss3 = args.loss_lambda_SSG3 * kmeans_trace_loss_fn(H_t, C, cluster_centroid_embedding=C0.T @ H_a.detach())
         else:
             inter_view_loss3 = torch.tensor(0.0).to(args.device)
         inter_view_loss = inter_view_loss0 + inter_view_loss1 + inter_view_loss2 + inter_view_loss3
-
-        H = fusion_attr(H_t, H_a)
+        H = fusion_attr(H_t, H_a, beta)
 
         # loss_prop = F.mse_loss(H @ H.T, X_prop @ X_prop.T)
         loss_prop = args.loss_lambda_prop * torch.pow(1 - cos_sim(H, X_prop), args.sharpening).mean()
@@ -167,7 +183,8 @@ def train():
 
         loss = loss_prop + loss_kmeans + inter_view_loss
         loss.backward()
-        optimizer_H.step()
+        optimizer_t.step()
+        optimizer_a.step()
 
 
 
@@ -178,7 +195,7 @@ def train():
         
         
         centers = torch.FloatTensor(centers).to(args.device)
-        H_all_cluster_simi = torch.einsum('nd, kd -> nk', H, centers)
+        H_all_cluster_simi = torch.einsum('nd, kd -> nk', H.detach(), centers)
         H_own_cluster_simi = H_all_cluster_simi[torch.arange(len(H)), predict_labels]
         # rescale the similarity with
         # 1. the range of each cluster
@@ -189,12 +206,16 @@ def train():
         #     rescale[j] = H_own_cluster_simi[predict_labels == j].mean()
         # H_own_cluster_simi = H_own_cluster_simi / rescale[predict_labels]
         # 2:
-        rescale = H_all_cluster_simi.sum(dim=1)/cluster_num
-        H_own_cluster_simi = H_own_cluster_simi / rescale
+        # rescale = H_all_cluster_simi.sum(dim=1)/cluster_num
+        # H_own_cluster_simi = H_own_cluster_simi / rescale
 
         # find the largest x-th entry in simi, x = 0.2*len(simi)
-        th = torch.sort(H_own_cluster_simi, descending=True)[0][int(0.2*len(H_own_cluster_simi))]
-        H_own_cluster_simi[H_own_cluster_simi < th] = 0
+        th1 = 0.5
+        # th1 = torch.sort(H_own_cluster_simi, descending=True)[0][int(0.5*len(H_own_cluster_simi))]
+        th2 = torch.sort(H_own_cluster_simi, descending=True)[0][int(0.5*len(H_own_cluster_simi))]
+        # mask = (H_own_cluster_simi < th1) & (H_own_cluster_simi > th2)
+        mask = H_own_cluster_simi > th2
+        H_own_cluster_simi[H_own_cluster_simi < th1] = 0
         # print(torch.where(H_own_cluster_simi > 0))
         # H_own_cluster_simi[H_own_cluster_simi >= th] = 1
         # if the node is in the top 20% of the cluster, then it is considered as a core node, cnt += 1
@@ -202,7 +223,9 @@ def train():
         if e == 0:
             simi = H_own_cluster_simi
         else:
+            # simi = H_own_cluster_simi
             simi = 0.7*simi + 0.3*H_own_cluster_simi
+        # simi = torch.ones_like(simi)
 
 
         # th = torch.sort(simi_o, descending=True)[0][int(0.5*len(simi_o))]
@@ -210,14 +233,34 @@ def train():
         # simi[simi < th] = 0
         # print(simi.mean().item(), simi.max().item(), simi.min().item())
 
-        H_t_all_cluster_simi = torch.einsum('nd, kd -> nk', H_t, centers)
+        H_t_all_cluster_simi = torch.einsum('nd, kd -> nk', H_t.detach(), centers)
+        H_t_all_cluster_simi = 0.5 * (H_t_all_cluster_simi + 1)
         H_t_own_cluster_simi = H_t_all_cluster_simi[torch.arange(len(H)), predict_labels]
-        H_a_all_cluster_simi = torch.einsum('nd, kd -> nk', H_a, centers)
+
+        H_a_all_cluster_simi = torch.einsum('nd, kd -> nk', H_a.detach(), centers)
+        H_a_all_cluster_simi = 0.5 * (H_a_all_cluster_simi + 1)
         H_a_own_cluster_simi = H_a_all_cluster_simi[torch.arange(len(H)), predict_labels]
 
         H_t_own_cluster_simi = H_t_own_cluster_simi / (H_t_all_cluster_simi.sum(dim=1)/cluster_num)
         H_a_own_cluster_simi = H_a_own_cluster_simi / (H_a_all_cluster_simi.sum(dim=1)/cluster_num)
-        pdb.set_trace()
+
+        if e == 0:
+            H_t_simi = H_t_own_cluster_simi
+            H_a_simi = H_a_own_cluster_simi
+        else:
+            H_t_simi = 0.7*H_t_simi + 0.3*H_t_own_cluster_simi
+            H_a_simi = 0.7*H_a_simi + 0.3*H_a_own_cluster_simi
+
+        # for inaccurate clustering results, adapt the beta
+        # adaption for nodes from top 20% to 80% 
+        # if mask.sum() > 0:
+            # new_beta = (H_t_simi/H_a_simi)[mask]
+            # mean = new_beta.mean()
+            # var = new_beta.std()
+            # new_beta = (new_beta - mean) / var + args.fusion_beta
+            # new_beta = (H_t_simi/H_a_simi)[mask]/(H_t_simi/H_a_simi)[mask].mean() * args.fusion_beta
+            # beta[mask, :] = 0.999*beta[mask, :] + 0.001*new_beta.reshape(-1, 1)
+
 
         # simi_t = (H_t.detach() * centers[predict_labels]).sum(dim=1)
         # simi_a = (H_a.detach() * centers[predict_labels]).sum(dim=1)
@@ -289,25 +332,25 @@ for fold in range(5):
 
 
     #### define model and optimizer #####
-    model = DeProp(in_channels=X.shape[1], hidden_channels=args.hidden_dim, 
-                   out_channels=args.hidden_dim, num_layers=args.gnnlayers, orth=True, 
-                   lambda1=args.lambda1, lambda2=args.lambda2, gamma=args.step_size_gamma, 
-                   with_bn=args.with_bn, F_norm=args.F_norm, dropout=args.dropout, lin=args.lin).to(args.device)
-    # model = encoding2(args, X.shape[1], args.hidden_dim, A, args.hidden_dim).to(args.device)
+    if args.top_prop == 'deprop':
+        model = DeProp(in_channels=args.hidden_dim, hidden_channels=args.hidden_dim, 
+                    out_channels=args.hidden_dim, num_layers=args.gnnlayers, orth=True, 
+                    lambda1=args.lambda1, lambda2=args.lambda2, gamma=args.step_size_gamma, 
+                    with_bn=args.with_bn, F_norm=args.F_norm, dropout=args.dropout, lin=args.lin).to(args.device)
+        # model = encoding2(args, X.shape[1], args.hidden_dim, A, args.hidden_dim).to(args.device)
+    else:
+        model = top_agg(A, args.top_alpha, args.top_layers, args.hidden_dim, args.hidden_dim, linear_prop=args.top_prop, linear_trans=args.top_linear_trans).to(args.device)
 
-    attr_model = attr_agg(X, args.attr_alpha, args.attr_layers, X.shape[1], args.hidden_dim, args.attr_r).to(args.device)
+    attr_model = attr_agg(X, args.attr_alpha, args.attr_layers, args.hidden_dim, args.hidden_dim, args.attr_r, linear_prop=args.attr_prop, linear_trans=args.attr_linear_trans).to(args.device)
     fusion_attr = fusion(args.fusion_method, args.fusion_beta).to(args.device)
     
-    # hetero_model = hetero_agg(args.hidden_dim, args.hidden_dim, args.hidden_dim, args.hidden_dim).to(args.device)
-    # fusion_hetero = fusion(args.fusion_method, args.fusion_beta).to(args.device)
     
-    optimizer_H = torch.optim.Adam(list(model.parameters()) + list(attr_model.parameters()), lr=args.H_lr)
-    # optimizer_H = torch.optim.SGD(list(model.parameters()) + list(attr_model.parameters()), lr=args.H_lr)
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer_H, milestones=[50, 100, 150], gamma=0.5)
+    optimizer_t = torch.optim.Adam(list(model.parameters()), lr=args.t_lr)
+    optimizer_a = torch.optim.Adam(list(attr_model.parameters()), lr=args.a_lr)
+    # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer_H, milestones=[50, 100, 150], gamma=0.5)
 
 
     ##### compute low rank X_prop #####
-    X_norm = F.normalize(X, p=2, dim=1)
     X_prop = X_norm
     for _ in range(args.xprop_layers):
         X_prop = args.xprop_alpha * torch.spmm(A, X_prop) + X_norm
@@ -327,7 +370,13 @@ for fold in range(5):
     cluster_ids,centers = k_means(X_prop.detach(), cluster_num, device=args.device, distance='cosine')
     C = cluster_id2assignment(cluster_ids, cluster_num).to(args.device)
     predict_labels_X_prop = torch.argmax(C, dim=1)
-    print_eval(predict_labels_X_prop.cpu().numpy(), true_labels, A.cpu().numpy())    
+    print_eval(predict_labels_X_prop.cpu().numpy(), true_labels, A.cpu().numpy())  
+
+
+    ##### compute the low rank X and A_norm #####
+    UX, _, _ = torch.svd_lowrank(X, q=args.hidden_dim, niter=7)
+    UA_norm, _, _ = torch.svd_lowrank(A, q=args.hidden_dim, niter=7)
+
 
     ##### training and evaluation #####
     res = train()
@@ -341,9 +390,10 @@ for fold in range(5):
 with open(args.log_file, 'a+') as f:
     # if the file is empty, write the header
     if os.path.getsize(args.log_file) == 0:
-        f.write('loss_lambda_kmeans, cprop_layers, cprop_alpha, SSG0, SSG1, SSG2, SSG3, ')
+        # f.write('top_laters, top_alpha, attr_layers, attr_alpha, xprop_layers, xprop_alpha, cprop_layers, cprop_alpha, ')
+        f.write('ssg0, ssg1, ssg2, ssg3, ')
         f.write('dataset, acc_mean, acc_std, nmi_mean, nmi_std, ari_mean, ari_std, f1_mean, f1_std, mod_mean, mod_std, con_mean, con_std\n')
-    f.write(', '.join([str(x) for x in [args.loss_lambda_kmeans, args.cprop_layers, args.cprop_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3]])+', ')
+    f.write(', '.join([str(x) for x in [args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3]])+', ')
     total_res = np.array(total_res)
     f.write('%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n'%(args.dataset, 
         total_res[:, 0].mean()*100, total_res[:, 0].std()*100, 

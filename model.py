@@ -18,6 +18,7 @@ import torch_geometric.transforms as T
 from torch_geometric.datasets import Planetoid
 from torch_geometric.logging import init_wandb, log
 from torch_geometric.nn import GCNConv
+from torch_geometric.nn.models import MLP
 
 
 from torch_geometric.typing import Adj, OptTensor
@@ -223,12 +224,56 @@ class encoding2(nn.Module):
         return H
 
 
+
+class top_agg(nn.Module):
+    def __init__(self, A_norm, alpha, hop, input_dim, hidden_dim, linear_prop='sgc', linear_trans=1):
+        super(top_agg, self).__init__()
+
+        if linear_prop=='sgc':
+            I = torch.eye(A_norm.shape[0]).to(A_norm.device)
+            top_filter = torch.eye(A_norm.shape[0]).to(A_norm.device)
+            for _ in range(hop):
+                top_filter = alpha * A_norm @ top_filter + I
+            self.top_filter = top_filter
+            if linear_trans==1:
+                self.fc = nn.Linear(input_dim, hidden_dim)
+            elif linear_trans==0:
+                self.fc = MLP(in_channels=input_dim, hidden_channels=hidden_dim, out_channels=hidden_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True)
+        elif linear_prop=='gcn':
+            self.top_filter = A_norm
+            self.lins = ModuleList()
+            self.lins.append(Linear(in_channels = input_dim, out_channels = hidden_dim, bias = True, weight_initializer = 'glorot'))
+            for i in range(hop-1):
+                self.lins.append(Linear(in_channels = hidden_dim, out_channels = hidden_dim, bias = True, weight_initializer = 'glorot'))
+        else:
+            raise NotImplementedError
+        self.linear_prop = linear_prop
+        
+    def forward(self, x):
+        if self.linear_prop == 'sgc':
+            x = self.fc(self.top_filter @ x)
+            x = F.normalize(x, p=2, dim=1)
+        elif self.linear_prop == 'gcn':
+            for lin in self.lins[:-1]:
+                x = lin(self.top_filter @ x)
+                x = F.relu(x)
+            x = self.lins[-1](self.top_filter @ x)
+        
+        
+        return x
+
+
+
+
+
 class attr_agg(nn.Module):
-    def __init__(self, X, alpha, hop, input_dim, hidden_dim, attr_r):
+    def __init__(self, X, alpha, hop, input_dim, hidden_dim, attr_r, linear_prop='sgc', linear_trans=1):
         super(attr_agg, self).__init__()
+
+        ### contruct the attribute similarity matrix ###
         X_n = F.normalize(X, p=2, dim=1)
         attr_simi_mtx = (X_n@X_n.t()).to(X.device)
-
+        # attr_simi_mtx[attr_simi_mtx<0] = 0
 
         row, col = torch.nonzero(attr_simi_mtx, as_tuple=True)
         values = attr_simi_mtx[row, col]
@@ -243,21 +288,42 @@ class attr_agg(nn.Module):
         col = col[sort_indices]
         attr_simi_mtx = torch.sparse_coo_tensor(torch.stack((row, col),0), values, attr_simi_mtx.shape)
         attr_simi_mtx = attr_simi_mtx.to_dense()
+        attr_simi_mtx = normalize_adj_torch(attr_simi_mtx, self_loop=False, symmetry=True)
+
+        ### setup the linear propagation model ###
+        if linear_prop=='sgc':
+            I = torch.eye(attr_simi_mtx.shape[0]).to(X.device)
+            attr_filter = torch.eye(attr_simi_mtx.shape[0]).to(X.device)
+            for _ in range(hop):
+                attr_filter = alpha * attr_simi_mtx @ attr_filter + I
+            self.attr_filter = attr_filter
+            if linear_trans==1:
+                self.fc = nn.Linear(input_dim, hidden_dim)
+            elif linear_trans==0:
+                self.fc = MLP(in_channels=input_dim, hidden_channels=hidden_dim, out_channels=hidden_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True)
+        elif linear_prop=='gcn':
+            self.attr_filter = attr_simi_mtx
+            self.lins = ModuleList()
+            self.lins.append(Linear(in_channels = input_dim, out_channels = hidden_dim, bias = True, weight_initializer = 'glorot'))
+            for i in range(hop-1):
+                self.lins.append(Linear(in_channels = hidden_dim, out_channels = hidden_dim, bias = True, weight_initializer = 'glorot'))
+        else:
+            raise NotImplementedError
+        self.linear_prop = linear_prop
 
 
-        I = torch.eye(attr_simi_mtx.shape[0]).to(X.device)
-        attr_filter = torch.eye(attr_simi_mtx.shape[0]).to(X.device)
-        for _ in range(hop):
-            attr_filter = alpha * attr_simi_mtx @ attr_filter + I
-        self.attr_filter = attr_filter
-
-        self.fc = nn.Linear(input_dim, hidden_dim)
 
         
     def forward(self, x):
-        x = F.normalize(x, p=2, dim=1)
-        x = self.fc(self.attr_filter @ x)
-        x = F.normalize(x, p=2, dim=1)
+        # x = F.normalize(x, p=2, dim=1)
+        if self.linear_prop == 'sgc':
+            x = self.fc(self.attr_filter @ x)
+            x = F.normalize(x, p=2, dim=1)  
+        elif self.linear_prop == 'gcn':
+            for lin in self.lins[:-1]:
+                x = lin(self.attr_filter @ x)
+                x = F.relu(x)
+            x = self.lins[-1](self.attr_filter @ x)
         
         return x
 
@@ -268,9 +334,11 @@ class fusion(nn.Module):
         self.fusion_method = fusion_method
         self.fusion_beta = fusion_beta
 
-    def forward(self, H_low, H_high):
-        H_low = self.fusion_beta * H_low
-        H_high = (1-self.fusion_beta) * H_high
+    def forward(self, H_low, H_high, beta=None):
+        if beta is None:
+            beta = self.fusion_beta
+        H_low = beta * H_low
+        H_high = (1-beta) * H_high
 
         if self.fusion_method == 'add':
             H =  H_low + H_high
@@ -401,10 +469,27 @@ class pool_based_model(nn.Module):
 
 def SSG_CCA_loss_fn(H1, H2):
     loss1 = F.mse_loss(H1, H2)
-    loss2 = F.mse_loss(H1.t() @ H1, torch.eye(H1.shape[1]).to(H1.device))
-    loss3 = F.mse_loss(H2.t() @ H2, torch.eye(H2.shape[1]).to(H2.device))
-    loss = loss1 + 0.1*(loss2 + loss3)
+    # loss2 = F.mse_loss(H1.t() @ H1, torch.eye(H1.shape[1]).to(H1.device))
+    # loss3 = F.mse_loss(H2.t() @ H2, torch.eye(H2.shape[1]).to(H2.device))
+    # loss = loss1 + 0.1*(loss2 + loss3)
+    return loss1
+
+def ortho_loss_fn(H):
+    return F.mse_loss(H.t() @ H, torch.eye(H.shape[1]).to(H.device))
+
+def node_t_neighbor_a_loss_fn(H_t, H_a, A):
+    H_a = A @ H_a
+    loss = F.mse_loss(H_t, H_a)
     return loss
+
+
+def node_t_cluster_a_loss_fn(H_t, H_a, C, simi):
+    centers = C.t() @ H_a # K x d
+    predict_labels = torch.argmax(C, dim=1)
+    centers = centers[predict_labels]
+    loss = (simi * (H_t - centers).norm(p=2, dim=1)).mean()
+    return loss
+
 
 
 def kmeans_loss_fn(H, C, args):
@@ -418,8 +503,9 @@ def kmeans_loss_fn(H, C, args):
         raise NotImplementedError
 
 
-def kmeans_trace_loss_fn(H, C):
-    cluster_centroid_embedding = C.T @ H
+def kmeans_trace_loss_fn(H, C, cluster_centroid_embedding=None):
+    if cluster_centroid_embedding is None:
+        cluster_centroid_embedding = C.T @ H
     loss = 0
     for i in range(C.shape[1]):
         loss += ((H - cluster_centroid_embedding[i])* C[:, i].unsqueeze(1)).norm(p=2, dim=1).sum()

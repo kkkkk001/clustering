@@ -23,7 +23,6 @@ class DeProp(torch.nn.Module):
 
 
         self.lin = lin
-        print(f"lin: {lin}")
         if not lin:
             self.linear = Linear(in_channels, hidden_channels, bias=False,
                               weight_initializer='glorot')
