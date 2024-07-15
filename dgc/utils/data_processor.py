@@ -45,7 +45,9 @@ def normalize_adj(adj, self_loop=True, symmetry=True):
         adj_tmp = adj
 
     # calculate degree matrix and it's inverse matrix
-    d = np.diag(adj_tmp.sum(0))
+    d = adj_tmp.sum(0)
+    d[d==0] = 1
+    d = np.diag(d)
     d_inv = np.linalg.inv(d)
 
     # symmetry normalize: D^{-0.5} A D^{-0.5}
@@ -76,6 +78,7 @@ def normalize_adj_torch(adj, self_loop=True, symmetry=True):
 
     # calculate degree matrix and it's inverse matrix
     deg_vec = adj_tmp.sum(0)
+    deg_vec[deg_vec == 0] = 1
 
 
     # symmetry normalize: D^{-0.5} A D^{-0.5}

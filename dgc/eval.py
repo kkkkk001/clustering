@@ -136,6 +136,7 @@ def print_eval(y_pred, y_true, A):
 	ari = ari_score(y_true, y_pred)
 
 	new_pred = match_cluster(y_true, y_pred)
+	# print(new_pred)
 
 	acc = accuracy_score(y_true, new_pred)
 	f1 = f1_score(y_true, new_pred, average='macro')

@@ -162,6 +162,7 @@ def train():
             inter_view_loss3 = torch.tensor(0.0).to(args.device)
         inter_view_loss = inter_view_loss0 + inter_view_loss1 + inter_view_loss2 + inter_view_loss3
         H = fusion_attr(H_t, H_a, beta)
+        print((H_t.detach() @ H_t.detach().T).mean().item(), (H_a.detach() @ H_a.detach().T).mean().item(), (H_t.detach().mean(axis=0) * H_a.detach().mean(axis=0)).sum().item(), (H.detach() @ H.detach().T).mean().item())
 
         # loss_prop = F.mse_loss(H @ H.T, X_prop @ X_prop.T)
         loss_prop = args.loss_lambda_prop * torch.pow(1 - cos_sim(H, X_prop), args.sharpening).mean()
@@ -232,24 +233,27 @@ def train():
         # simi = simi_o.clone()
         # simi[simi < th] = 0
         # print(simi.mean().item(), simi.max().item(), simi.min().item())
+        
+        ##### adapt the beta #####
+        # H_t_all_cluster_simi = torch.einsum('nd, kd -> nk', H_t.detach(), centers)
+        # H_t_all_cluster_simi = 0.5 * (H_t_all_cluster_simi + 1)
+        # H_t_own_cluster_simi = H_t_all_cluster_simi[torch.arange(len(H)), predict_labels]
 
-        H_t_all_cluster_simi = torch.einsum('nd, kd -> nk', H_t.detach(), centers)
-        H_t_all_cluster_simi = 0.5 * (H_t_all_cluster_simi + 1)
-        H_t_own_cluster_simi = H_t_all_cluster_simi[torch.arange(len(H)), predict_labels]
+        # H_a_all_cluster_simi = torch.einsum('nd, kd -> nk', H_a.detach(), centers)
+        # H_a_all_cluster_simi = 0.5 * (H_a_all_cluster_simi + 1)
+        # H_a_own_cluster_simi = H_a_all_cluster_simi[torch.arange(len(H)), predict_labels]
 
-        H_a_all_cluster_simi = torch.einsum('nd, kd -> nk', H_a.detach(), centers)
-        H_a_all_cluster_simi = 0.5 * (H_a_all_cluster_simi + 1)
-        H_a_own_cluster_simi = H_a_all_cluster_simi[torch.arange(len(H)), predict_labels]
+        # H_t_own_cluster_simi = H_t_own_cluster_simi / (H_t_all_cluster_simi.sum(dim=1)/cluster_num)
+        # H_a_own_cluster_simi = H_a_own_cluster_simi / (H_a_all_cluster_simi.sum(dim=1)/cluster_num)
 
-        H_t_own_cluster_simi = H_t_own_cluster_simi / (H_t_all_cluster_simi.sum(dim=1)/cluster_num)
-        H_a_own_cluster_simi = H_a_own_cluster_simi / (H_a_all_cluster_simi.sum(dim=1)/cluster_num)
+        # if e == 0:
+        #     H_t_simi = H_t_own_cluster_simi
+        #     H_a_simi = H_a_own_cluster_simi
+        # else:
+        #     H_t_simi = 0.7*H_t_simi + 0.3*H_t_own_cluster_simi
+        #     H_a_simi = 0.7*H_a_simi + 0.3*H_a_own_cluster_simi
+        ##### end #####
 
-        if e == 0:
-            H_t_simi = H_t_own_cluster_simi
-            H_a_simi = H_a_own_cluster_simi
-        else:
-            H_t_simi = 0.7*H_t_simi + 0.3*H_t_own_cluster_simi
-            H_a_simi = 0.7*H_a_simi + 0.3*H_a_own_cluster_simi
 
         # for inaccurate clustering results, adapt the beta
         # adaption for nodes from top 20% to 80% 
@@ -354,7 +358,10 @@ for fold in range(5):
     X_prop = X_norm
     for _ in range(args.xprop_layers):
         X_prop = args.xprop_alpha * torch.spmm(A, X_prop) + X_norm
-    U, S, _ = torch.svd_lowrank(X_prop, q=args.hidden_dim, niter=7)
+    if args.fusion_method == 'concat':
+        U, S, _ = torch.svd_lowrank(X_prop, q=2*args.hidden_dim, niter=7)
+    else:
+        U, S, _ = torch.svd_lowrank(X_prop, q=args.hidden_dim, niter=7)
     X_prop = U @ torch.diag(S)
     X_prop = F.normalize(X_prop, p=2, dim=1)
 

@@ -252,6 +252,7 @@ class top_agg(nn.Module):
     def forward(self, x):
         if self.linear_prop == 'sgc':
             x = self.fc(self.top_filter @ x)
+            # x = (x - x.mean(0)) / x.std(0) / torch.sqrt(torch.tensor(x.shape[1]).to(x.device))
             x = F.normalize(x, p=2, dim=1)
         elif self.linear_prop == 'gcn':
             for lin in self.lins[:-1]:
@@ -273,10 +274,11 @@ class attr_agg(nn.Module):
         ### contruct the attribute similarity matrix ###
         X_n = F.normalize(X, p=2, dim=1)
         attr_simi_mtx = (X_n@X_n.t()).to(X.device)
-        # attr_simi_mtx[attr_simi_mtx<0] = 0
+        attr_simi_mtx[attr_simi_mtx<0] = 0
+        # attr_simi_mtx = attr_simi_mtx - torch.diag_embed(torch.diag(attr_simi_mtx))
 
         row, col = torch.nonzero(attr_simi_mtx, as_tuple=True)
-        values = attr_simi_mtx[row, col]
+        values = attr_simi_mtx[row, col] 
         _, sort_indices = torch.sort(values, descending=True)
 
         keep_size = int(attr_r * len(sort_indices))
@@ -289,6 +291,7 @@ class attr_agg(nn.Module):
         attr_simi_mtx = torch.sparse_coo_tensor(torch.stack((row, col),0), values, attr_simi_mtx.shape)
         attr_simi_mtx = attr_simi_mtx.to_dense()
         attr_simi_mtx = normalize_adj_torch(attr_simi_mtx, self_loop=False, symmetry=True)
+        self.attr_simi_mtx = attr_simi_mtx
 
         ### setup the linear propagation model ###
         if linear_prop=='sgc':
@@ -318,7 +321,8 @@ class attr_agg(nn.Module):
         # x = F.normalize(x, p=2, dim=1)
         if self.linear_prop == 'sgc':
             x = self.fc(self.attr_filter @ x)
-            x = F.normalize(x, p=2, dim=1)  
+            # x = (x - x.mean(0)) / x.std(0) / torch.sqrt(torch.tensor(x.shape[1]).to(x.device))
+            x = F.normalize(x, p=2, dim=1)
         elif self.linear_prop == 'gcn':
             for lin in self.lins[:-1]:
                 x = lin(self.attr_filter @ x)
@@ -329,10 +333,14 @@ class attr_agg(nn.Module):
 
 
 class fusion(nn.Module):
-    def __init__(self, fusion_method, fusion_beta):
+    def __init__(self, fusion_method, fusion_beta, hidden_dim):
         super(fusion, self).__init__()
         self.fusion_method = fusion_method
         self.fusion_beta = fusion_beta
+        if fusion_method == 'concat':
+            self.fusion_fc = nn.Linear(2*hidden_dim, hidden_dim)
+        else: 
+            self.fusion_fc = nn.Linear(hidden_dim, hidden_dim)
 
     def forward(self, H_low, H_high, beta=None):
         if beta is None:
@@ -343,7 +351,8 @@ class fusion(nn.Module):
         if self.fusion_method == 'add':
             H =  H_low + H_high
         elif self.fusion_method == 'concat':
-            H = torch.cat((H_low, H_high), dim=1)
+            H = self.fusion_fc(torch.cat((H_low, H_high), dim=1))
+            H = F.normalize(H, p=2, dim=1) 
         elif self.fusion_method == 'max':
             H = torch.max(H_low, H_high)
         else:
@@ -482,11 +491,21 @@ def node_t_neighbor_a_loss_fn(H_t, H_a, A):
     loss = F.mse_loss(H_t, H_a)
     return loss
 
+def node_t_neighbor_a_loss_fn2(H_t, H_a, A_ori):
+    A_norm = normalize_adj_torch(A_ori, self_loop=False, symmetry=False)
+    H_a = A_norm @ H_a
+    loss = F.mse_loss(H_t, H_a)
+    return loss
 
-def node_t_cluster_a_loss_fn(H_t, H_a, C, simi):
-    centers = C.t() @ H_a # K x d
+def node_t_cluster_a_loss_fn(H_t, H_a, C, simi=None, centers=None):
+    if simi is None:
+        simi = torch.ones(H_t.shape[0]).to(H_t.device)
+    if centers is None:
+        # C = F.normalize(C, p=2, dim=1)
+        centers = C.t() @ H_a # K x d
     predict_labels = torch.argmax(C, dim=1)
     centers = centers[predict_labels]
+    # loss = torch.pow((simi * (H_t - centers).norm(p=2, dim=1)), 2).mean()
     loss = (simi * (H_t - centers).norm(p=2, dim=1)).mean()
     return loss
 
@@ -494,7 +513,7 @@ def node_t_cluster_a_loss_fn(H_t, H_a, C, simi):
 
 def kmeans_loss_fn(H, C, args):
     if args.kmeans_loss == 'tr':
-        return kmeans_trace_loss_fn(H, C)
+        return node_t_cluster_a_loss_fn(H, H, C)
     elif args.kmeans_loss == 'cen':
         return kmeans_centroid_contrastive_loss_fn(H, C, args)
     elif args.kmeans_loss == 'nod':
@@ -503,12 +522,13 @@ def kmeans_loss_fn(H, C, args):
         raise NotImplementedError
 
 
-def kmeans_trace_loss_fn(H, C, cluster_centroid_embedding=None):
-    if cluster_centroid_embedding is None:
-        cluster_centroid_embedding = C.T @ H
+def kmeans_trace_loss_fn(H, C, centers=None):
+    if centers is None:
+        centers = C.T @ H
     loss = 0
     for i in range(C.shape[1]):
-        loss += ((H - cluster_centroid_embedding[i])* C[:, i].unsqueeze(1)).norm(p=2, dim=1).sum()
+        loss += torch.pow(H[torch.argmax(C, dim=1) == i] - centers[i],2).sum(axis=1).mean()
+        # loss += torch.pow(((H - centers[i]) * C[:, i].unsqueeze(1)),2).sum()
     return loss/C.shape[0]/C.shape[1]
 
 
@@ -516,7 +536,10 @@ def kmeans_centroid_contrastive_loss_fn(H, C, args):
     # pos: node representation vs. its cluster centroid
     # neg: node representation vs. other cluster centroids
     cluster_centroid_embedding = C.T @ H
-    sim = torch.einsum("nd, cd -> nc", H, cluster_centroid_embedding)
+    H = F.normalize(H, p=2, dim=1)
+    cluster_centroid_embedding = F.normalize(cluster_centroid_embedding, p=2, dim=1)
+    sim = torch.einsum("nd, kd -> nk", H, cluster_centroid_embedding)
+    # sim = sim * C
     sim /= args.temperature
     labels = torch.argmax(C, dim=1)
     return F.cross_entropy(sim, labels) 
