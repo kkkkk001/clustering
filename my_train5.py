@@ -106,9 +106,9 @@ if args.log_fold_file is None:
 print(args)
 
 ##### load data #####
-X, y, A = load_graph_data(root_path='/home/kxie/cluster/dataset/', 
+X, true_labels, A = load_graph_data(root_path='/home/kxie/cluster/dataset/', 
                           dataset_name=args.dataset, show_details=True)
-cluster_num = len(np.unique(y))
+cluster_num = len(np.unique(true_labels))
 
 
 edge_index = torch.LongTensor(np.array(A.nonzero())).to(args.device)
@@ -117,11 +117,8 @@ org_adj = A
 A = normalize_adj_torch(A, self_loop=True, symmetry=True)
 X = torch.FloatTensor(X).to(args.device)
 X_norm = F.normalize(X, p=2, dim=1)
-y = torch.LongTensor(y).to(args.device)
-true_labels = y.cpu().numpy()
-true_labels_onehot = np.zeros((len(true_labels), cluster_num))
-true_labels_onehot[np.arange(len(true_labels)), true_labels] = 1
-true_CCT = true_labels_onehot @ true_labels_onehot.T
+
+
 
 
 def train():
@@ -155,7 +152,8 @@ def train():
         else:
             cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers='kmeans')
         C0 = cluster_id2assignment(cluster_ids, cluster_num).to(args.device)
-        C = Cprop(C0, A, args)
+        # C = Cprop(C0, A, args)
+        C = C_prop_model(C0)
         C = F.normalize(C, p=2, dim=1)
         loss_kmeans = args.loss_lambda_kmeans * kmeans_loss_fn(H, C, args)
         
@@ -212,9 +210,7 @@ for fold in range(5):
                     with_bn=args.with_bn, F_norm=args.F_norm, dropout=args.dropout, lin=args.lin).to(args.device)
         # model = encoding2(args, X.shape[1], args.hidden_dim, A, args.hidden_dim).to(args.device)
     else:
-        pdb.set_trace()
         model = top_agg(A, args.top_alpha, args.top_layers, args.hidden_dim, args.hidden_dim, linear_prop=args.top_prop, linear_trans=args.top_linear_trans).to(args.device)
-    pdb.set_trace()
     attr_model = attr_agg(X, args.attr_alpha, args.attr_layers, args.hidden_dim, args.hidden_dim, args.attr_r, linear_prop=args.attr_prop, linear_trans=args.attr_linear_trans).to(args.device)
     fusion_attr = fusion(args.fusion_method, args.fusion_beta, args.hidden_dim).to(args.device)
     
@@ -223,6 +219,7 @@ for fold in range(5):
     optimizer_a = torch.optim.Adam(list(attr_model.parameters()), lr=args.a_lr, weight_decay=args.a_wd)
 
 
+    C_prop_model = C_agg(args.cprop_alpha, args.cprop_layers, A).to(args.device)
 
     ##### compute low rank X_prop #####
     X_prop = X_norm

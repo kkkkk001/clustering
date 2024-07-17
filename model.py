@@ -361,6 +361,25 @@ class fusion(nn.Module):
         return H
 
 
+
+class C_agg(nn.Module):
+    def __init__(self, alpha, hop, A):
+        super(C_agg, self).__init__()
+
+        I = torch.eye(A.shape[0]).to(A.device)
+        C_filter = torch.eye(A.shape[0]).to(A.device)
+        for _ in range(hop):
+            C_filter = alpha * torch.spmm(A, C_filter) + I
+        self.C_filter = C_filter
+
+        
+    def forward(self, C):
+        return self.C_filter @ C
+    
+
+
+
+
 class attr_agg2(nn.Module):
     def __init__(self, X, alpha, hop, input_dim, hidden_dim):
         super(attr_agg2, self).__init__()

@@ -83,13 +83,17 @@ def normalize_adj_torch(adj, self_loop=True, symmetry=True):
 
     # symmetry normalize: D^{-0.5} A D^{-0.5}
     if symmetry:
-        norm_adj = torch.pow(deg_vec, -0.5).unsqueeze(0) * adj_tmp * torch.pow(deg_vec, -0.5).unsqueeze(1)
+        deg_vec.pow_(-0.5)
+        norm_adj = deg_vec.unsqueeze(0) * adj_tmp * deg_vec.unsqueeze(1)
 
     # non-symmetry normalize: D^{-1} A
     else:
-        norm_adj = torch.pow(deg_vec, -1).unsqueeze(0) * adj_tmp
+        deg_vec.pow_(-1)
+        norm_adj = deg_vec.unsqueeze(0) * adj_tmp
 
     return norm_adj
+
+
 
 
 def construct_graph(feat, k=5, metric="euclidean"):
