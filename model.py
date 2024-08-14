@@ -285,7 +285,7 @@ class attr_agg(nn.Module):
         sort_indices = sort_indices[:keep_size]
 
         values = values[sort_indices]
-        # values = torch.ones_like(values[sort_indices])
+        # values = torch.ones_like(values)
         row = row[sort_indices]
         col = col[sort_indices]
         attr_simi_mtx = torch.sparse_coo_tensor(torch.stack((row, col),0), values, attr_simi_mtx.shape)
@@ -370,6 +370,7 @@ class C_agg(nn.Module):
         C_filter = torch.eye(A.shape[0]).to(A.device)
         for _ in range(hop):
             C_filter = alpha * torch.spmm(A, C_filter) + I
+        # C_filter -= I
         self.C_filter = C_filter
 
         
@@ -514,13 +515,15 @@ def node_t_neighbor_a_loss_fn2(H_t, H_a, A_ori):
     A_norm = normalize_adj_torch(A_ori, self_loop=False, symmetry=False)
     H_a = A_norm @ H_a
     loss = F.mse_loss(H_t, H_a)
+    # loss = (H_t - H_a).norm(p=2, dim=1).mean()
+
     return loss
 
 def node_t_cluster_a_loss_fn(H_t, H_a, C, simi=None, centers=None):
     if simi is None:
         simi = torch.ones(H_t.shape[0]).to(H_t.device)
     if centers is None:
-        # C = F.normalize(C, p=2, dim=1)
+        C = F.normalize(C, p=2, dim=1)
         centers = C.t() @ H_a # K x d
     predict_labels = torch.argmax(C, dim=1)
     centers = centers[predict_labels]
@@ -528,6 +531,22 @@ def node_t_cluster_a_loss_fn(H_t, H_a, C, simi=None, centers=None):
     loss = (simi * (H_t - centers).norm(p=2, dim=1)).mean()
     return loss
 
+
+def node_t_cluster_a_loss_fn2(H_t, H_a, C, simi=None, centers=None):
+    if centers is None:
+        # print(C.sum(0), C.sum(0).mean())
+        # C = F.normalize(C, p=1, dim=0)
+        # C = C/C.sum(0).mean()
+        centers = C.t() @ H_a # K x d
+    predict_labels = torch.argmax(C, dim=1)
+    centers = centers[predict_labels]
+    if simi is None:
+        loss = F.mse_loss(H_t, centers)
+        # loss = (H_t - centers).norm(p=2, dim=1).mean()
+        # loss = (H_t - centers).pow(2).sum(dim=1).mean()
+    else:
+        loss = (simi * (H_t - centers).pow(2)).mean()
+    return loss
 
 
 def kmeans_loss_fn(H, C, args):
@@ -554,11 +573,20 @@ def kmeans_trace_loss_fn(H, C, centers=None):
 def kmeans_centroid_contrastive_loss_fn(H, C, args):
     # pos: node representation vs. its cluster centroid
     # neg: node representation vs. other cluster centroids
+
+
+    # C_bin = torch.zeros_like(C)
+    # pred_clu = torch.argmax(C, dim=1)
+    # C_bin[torch.arange(C.shape[0]), pred_clu] = 1
+    # C_bin = F.normalize(C_bin, p=1, dim=0)
+    # cluster_centroid_embedding = C_bin.T @ H
+    C = F.normalize(C, p=1, dim=0)
     cluster_centroid_embedding = C.T @ H
+
     H = F.normalize(H, p=2, dim=1)
     cluster_centroid_embedding = F.normalize(cluster_centroid_embedding, p=2, dim=1)
     sim = torch.einsum("nd, kd -> nk", H, cluster_centroid_embedding)
-    # sim = sim * C
+    sim = sim * C
     sim /= args.temperature
     labels = torch.argmax(C, dim=1)
     return F.cross_entropy(sim, labels) 

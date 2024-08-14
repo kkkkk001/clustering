@@ -10,12 +10,14 @@ from dgc.clustering import k_means
 from dgc.eval import print_eval, match_cluster
 from dgc.rand import setup_seed
 from datetime import datetime
+import time
 from distutils.util import strtobool
 import sys
 sys.path.insert(0, '/home/kxie/cluster/DeProp')
 from DeProp.model import DeProp
 setup_seed(42)
 torch.autograd.set_detect_anomaly(True)
+start_time = time.time()
 print('start time:', datetime.now())
 from utils import cluster_id2assignment, Cprop
 cos_sim = nn.CosineSimilarity(dim=1, eps=1e-6)
@@ -35,7 +37,7 @@ parser.add_argument('--t_lr', type=float, default=1e-3, help='Initial learning r
 parser.add_argument('--a_lr', type=float, default=1e-3, help='Initial learning rate.')
 parser.add_argument('--t_wd', type=float, default=5e-4, help='')
 parser.add_argument('--a_wd', type=float, default=5e-4, help='')
-parser.add_argument('--device', type=str, default='cuda:0', help='device')
+parser.add_argument('--device', type=str, default='cuda', help='device')
 parser.add_argument('--dropout', type=float, default=0.0, help='')
 parser.add_argument('--norm', type=int, default=0, help='')
 
@@ -125,7 +127,7 @@ def train():
     ##### train #####
     best_acc = 0
     best_res = []
-    
+
     beta = args.fusion_beta
     for e in range(args.epochs):
         optimizer_t.zero_grad()
@@ -144,6 +146,7 @@ def train():
             print('nan in H')
             pdb.set_trace()
 
+
         loss_prop = args.loss_lambda_prop * torch.pow(1 - cos_sim(H, X_prop), args.sharpening).mean()
 
         if e == 0:
@@ -151,13 +154,18 @@ def train():
             cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers=centers_xprop)
         else:
             cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers='kmeans')
+
         C0 = cluster_id2assignment(cluster_ids, cluster_num).to(args.device)
         # C = Cprop(C0, A, args)
         C = C_prop_model(C0)
+        # C = C0
         C = F.normalize(C, p=2, dim=1)
+
+
         loss_kmeans = args.loss_lambda_kmeans * kmeans_loss_fn(H, C, args)
         
-        
+
+
         if args.norm == 1:
             H_t_norm = (H_t - H_t.mean(dim=0)) / H_t.std(dim=0) / torch.sqrt(torch.tensor(H_t.shape[1]).to(H_t.device))
             H_a_norm = (H_a - H_a.mean(dim=0)) / H_a.std(dim=0) / torch.sqrt(torch.tensor(H_a.shape[1]).to(H_a.device))
@@ -165,10 +173,14 @@ def train():
             H_t_norm = H_t
             H_a_norm = H_a
         ort_loss = args.loss_lambda_SSG0 * (ortho_loss_fn(H_t_norm) + ortho_loss_fn(H_a_norm))
-        inv_loss_o = args.loss_lambda_SSG1 * (H_t_norm - H_a_norm).pow(2).sum()
+        # inv_loss_o = args.loss_lambda_SSG1 * (H_t_norm - H_a_norm).pow(2).sum()
+        inv_loss_o = args.loss_lambda_SSG1 * F.mse_loss(H_t_norm, H_a_norm)
+        # inv_loss_o = args.loss_lambda_SSG1 * (H_t_norm - H_a_norm).norm(p=2, dim=1).mean()
         inv_loss_n = args.loss_lambda_SSG2 * (node_t_neighbor_a_loss_fn2(H_t_norm, H_a_norm, A_ori=org_adj) + node_t_neighbor_a_loss_fn2(H_a_norm, H_t_norm, A_ori=org_adj))
-        inv_loss_c = args.loss_lambda_SSG3 * (node_t_cluster_a_loss_fn(H_t_norm, H_a_norm, C) + node_t_cluster_a_loss_fn(H_a_norm, H_t_norm, C))
+        print(C.sum(0).mean(), C.sum(0).max())
+        inv_loss_c = args.loss_lambda_SSG3 * (node_t_cluster_a_loss_fn2(H_t_norm, H_a_norm, C) + node_t_cluster_a_loss_fn2(H_a_norm, H_t_norm, C))
         inv_loss = inv_loss_o + inv_loss_n + inv_loss_c
+
 
         loss = loss_prop + loss_kmeans + ort_loss + inv_loss
         loss.backward()
@@ -176,13 +188,13 @@ def train():
         optimizer_a.step()
 
 
-
         ## evaluation
         print('epoch: %d , loss: %.2f, loss_kmeans: %.2f, loss_prop: %.2f, ort_loss: %.2f, loss_inv: %.2f' % (e, loss.item(), loss_kmeans.item(), loss_prop, ort_loss, inv_loss), end=' ')
+        print('inv_loss1: %.2f, inv_loss2: %.2f, inv_loss3: %.2f' % (inv_loss_o, inv_loss_n, inv_loss_c), end=' ')
         predict_labels = torch.argmax(C, dim=1)
         res = print_eval(predict_labels.cpu().numpy(), true_labels, A.cpu().numpy())
-    
         
+
         ## best acc
         if res[0] > best_acc:
             best_acc = res[0]
@@ -196,7 +208,7 @@ def train():
 total_res = []
 # final result is the mean of 5 repeated experiments
 for fold in range(5):
-    setup_seed(42+fold)
+    setup_seed(43+fold)
     print("#"*60)
     print("#"*26, ' fold:%d ' % fold, "#"*26)
     print("#"*60)
@@ -229,26 +241,47 @@ for fold in range(5):
     X_prop = U @ torch.diag(S)
     X_prop = F.normalize(X_prop, p=2, dim=1)
 
-
     ##### test the clustering quality on initial X #####
     print('clustering results on initial X:\t', end=' ')
     cluster_ids,_ = k_means(X, cluster_num, device='cpu', distance='cosine')
-    C = cluster_id2assignment(cluster_ids, cluster_num).to(args.device)
-    predict_labels_X = torch.argmax(C, dim=1)
-    print_eval(predict_labels_X.cpu().numpy(), true_labels, A.cpu().numpy())   
+    print_eval(cluster_ids, true_labels, A.cpu().numpy())   
 
 
     ##### test the clustering quality on initial X_prop #####
     print('clustering results on initial X_prop:\t', end=' ')
     cluster_ids,centers = k_means(X_prop.detach(), cluster_num, device='cpu', distance='cosine')
-    C = cluster_id2assignment(cluster_ids, cluster_num).to(args.device)
-    predict_labels_X_prop = torch.argmax(C, dim=1)
-    print_eval(predict_labels_X_prop.cpu().numpy(), true_labels, A.cpu().numpy())  
+    print_eval(cluster_ids, true_labels, A.cpu().numpy())  
+
 
 
     ##### compute the low rank X and A_norm #####
     US_norm, _, _ = torch.svd_lowrank(attr_model.attr_simi_mtx, q=args.hidden_dim, niter=7)
     UA_norm, _, _ = torch.svd_lowrank(A, q=args.hidden_dim, niter=7)
+
+
+    print('clustering results on initial H_t:\t', end=' ')
+    cluster_ids,centers = k_means((model.top_filter @ US_norm).detach(), cluster_num, device='cpu', distance='cosine')
+    print_eval(cluster_ids, true_labels, A.cpu().numpy()) 
+
+    print('clustering results on initial H_a:\t', end=' ')
+    cluster_ids,centers = k_means((attr_model.attr_filter @ UA_norm).detach(), cluster_num, device='cpu', distance='cosine')
+    print_eval(cluster_ids, true_labels, A.cpu().numpy())  
+
+
+    def test1(alpha, layer):
+        model1 = top_agg(A, alpha, layer, args.hidden_dim, args.hidden_dim, linear_prop=args.top_prop, linear_trans=args.top_linear_trans).to(args.device)
+        emb = model1.top_filter @ US_norm
+        cluster_ids,centers = k_means(emb.detach(), cluster_num, device='cpu', distance='cosine')
+        print_eval(cluster_ids, true_labels, A.cpu().numpy())  
+
+
+    def test2(alpha, layer, attr_r):
+        model1 = attr_agg(A, alpha, layer, args.hidden_dim, args.hidden_dim, attr_r, linear_prop=args.top_prop, linear_trans=args.top_linear_trans).to(args.device)
+        emb = model1.attr_filter @ UA_norm
+        cluster_ids,centers = k_means(emb.detach(), cluster_num, device='cpu', distance='cosine')
+        print_eval(cluster_ids, true_labels, A.cpu().numpy()) 
+
+    # pdb.set_trace()
 
 
     ##### training and evaluation #####
@@ -272,32 +305,35 @@ print('%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2
 print(total_res)
 
 
+total_time = time.time() - start_time
+print('total time:', total_time)
 
 # save the result
 with open(args.log_file, 'a+') as f:
     # if the file is empty, write the header
     if os.path.getsize(args.log_file) == 0:
-        f.write('norm, layers, alpha, S_alpha, ssg0, ssg1, ssg, ')
-        f.write('dataset, acc_mean, acc_std, nmi_mean, nmi_std, ari_mean, ari_std, f1_mean, f1_std, mod_mean, mod_std, con_mean, con_std\n')
-    f.write(', '.join([str(x) for x in [args.norm, args.top_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2]])+', ')
-    f.write('%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n'%(args.dataset, 
+        f.write('norm, layers, alpha, S_alpha, ssg0, ssg1, ssg2, ssg3, ')
+        f.write('dataset, acc_mean, acc_std, nmi_mean, nmi_std, ari_mean, ari_std, f1_mean, f1_std, mod_mean, mod_std, con_mean, con_std, time\n')
+    f.write(', '.join([str(x) for x in [args.norm, args.top_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3]])+', ')
+    f.write('%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n'%(args.dataset, 
         total_res[:, 0].mean()*100, total_res[:, 0].std()*100, 
         total_res[:, 1].mean()*100, total_res[:, 1].std()*100, 
         total_res[:, 2].mean()*100, total_res[:, 2].std()*100, 
         total_res[:, 3].mean()*100, total_res[:, 3].std()*100, 
         total_res[:, 4].mean()*100, total_res[:, 4].std()*100, 
-        total_res[:, 5].mean()*100, total_res[:, 5].std()*100))
+        total_res[:, 5].mean()*100, total_res[:, 5].std()*100, total_time))
     
+
 # save the result of each fold
 with open(args.log_fold_file, 'a+') as f:
     # if the file is empty, write the header
     if os.path.getsize(args.log_file) == 0:
-        f.write('norm, layers, alpha, S_alpha, ssg0, ssg1, ssg, ')
-        f.write('dataset, fold, acc_mean, nmi_mean, ari_mean, f1_mean, mod_mean, con_mean\n')
+        f.write('norm, layers, alpha, S_alpha, ssg0, ssg1, ssg2, ssg3, ')
+        f.write('dataset, fold, acc_mean, nmi_mean, ari_mean, f1_mean, mod_mean, con_mean, time\n')
     for i in range(total_res.shape[0]):
-        f.write(', '.join([str(x) for x in [args.norm, args.top_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2]])+', ')
-        f.write('%s, %d, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n'%(args.dataset, i, 
-            total_res[i, 0]*100, total_res[i, 1]*100, total_res[i, 2]*100, total_res[i, 3]*100, total_res[i, 4]*100, total_res[i, 5]*100))
+        f.write(', '.join([str(x) for x in [args.norm, args.top_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3]])+', ')
+        f.write('%s, %d, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n'%(args.dataset, i, 
+            total_res[i, 0]*100, total_res[i, 1]*100, total_res[i, 2]*100, total_res[i, 3]*100, total_res[i, 4]*100, total_res[i, 5]*100, total_time))
    
 
 
