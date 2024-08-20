@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import torch_geometric.transforms as T
 import torch.optim.lr_scheduler as lr_scheduler
 
-from torch_geometric.datasets import Planetoid
+from torch_geometric.datasets import Planetoid, WikipediaNetwork, WebKB
 from torch_geometric.datasets import Amazon
 from torch_geometric.datasets import Coauthor
 
@@ -26,6 +26,11 @@ import os
 
 import pdb, time
 from datetime import datetime
+from torch_geometric.data import Data
+import sys, pdb
+sys.path.append('../dgc')
+from clustering import k_means
+from eval import print_eval, modularity
 
 start_time = time.time()
 print('start time:', datetime.now())
@@ -34,7 +39,7 @@ print('start time:', datetime.now())
 def parse_args():
     args = argparse.ArgumentParser(description='DGCluster arguments.')
     args.add_argument('--dataset', type=str, default='cora')
-    args.add_argument('--lam', type=float, default=0.2)
+    args.add_argument('--lam', type=float, default=0)
     args.add_argument('--alp', type=float, default=0.0)
     args.add_argument('--device', type=str, default='cuda:0', choices=['cpu', 'cuda:0', 'cuda:1', 'cuda:2', 'cuda:3'])
     args.add_argument('--epochs', type=int, default=300)
@@ -45,24 +50,45 @@ def parse_args():
     return args
 
 
-def load_dataset(dataset_name):
-    if dataset_name == 'cora':
-        dataset = Planetoid(root='data', name="Cora")
-    elif dataset_name == 'citeseer':
-        dataset = Planetoid(root='data', name="Citeseer")
-    elif dataset_name == 'pubmed':
-        dataset = Planetoid(root='data', name="PubMed")
-    elif dataset_name == 'computers':
-        dataset = Amazon(root='data', name='Computers')
-    elif dataset_name == 'photo':
-        dataset = Amazon(root='data', name='Photo')
-    elif dataset_name == 'coauthorcs':
-        dataset = Coauthor(root='data/Coauthor', name='CS')
-    elif dataset_name == 'coauthorphysics':
-        dataset = Coauthor(root='data/Coauthor', name='Physics')
+def load_dataset(dataset_name, root_path='/home/kxie/cluster/dataset/'):
+    
+    if dataset_name in ["chameleon", "crocodile", "squirrel"]:
+        dataset = WikipediaNetwork(root=root_path+'pyg', name=dataset_name)
+        data = dataset[0]
+    elif dataset_name== "wisc":
+        dataset = WebKB(root=root_path+'pyg', name="Wisconsin")
+        data = dataset[0]
     else:
-        raise NotImplementedError(f'Dataset: {dataset_name} not implemented.')
-    return dataset
+        dataset_path = root_path + dataset_name
+        if not os.path.exists(dataset_path):
+            raise NotImplementedError("The dataset is not supported")
+        print("Loading " + dataset_name + " dataset from local")
+        load_path = root_path + dataset_name + "/" + dataset_name
+        feat = np.load(load_path+"_feat.npy", allow_pickle=True)
+        label = np.load(load_path+"_label.npy", allow_pickle=True)
+        adj = np.load(load_path+"_adj.npy", allow_pickle=True)
+
+        data = Data(x=torch.tensor(feat).float(), y=torch.tensor(label).long(), edge_index=torch.tensor(adj.nonzero()), num_nodes=adj.shape[0])
+    
+    return data
+    
+    # if dataset_name == 'cora':
+    #     dataset = Planetoid(root='data', name="Cora")
+    # elif dataset_name == 'citeseer':
+    #     dataset = Planetoid(root='data', name="Citeseer")
+    # elif dataset_name == 'pubmed':
+    #     dataset = Planetoid(root='data', name="PubMed")
+    # elif dataset_name == 'computers':
+    #     dataset = Amazon(root='data', name='Computers')
+    # elif dataset_name == 'photo':
+    #     dataset = Amazon(root='data', name='Photo')
+    # elif dataset_name == 'coauthorcs':
+    #     dataset = Coauthor(root='data/Coauthor', name='CS')
+    # elif dataset_name == 'coauthorphysics':
+    #     dataset = Coauthor(root='data/Coauthor', name='Physics')
+    # else:
+    #     raise NotImplementedError(f'Dataset: {dataset_name} not implemented.')
+    # return dataset
 
 
 class GNN(nn.Module):
@@ -185,14 +211,27 @@ def loss_fn(output, lam=0.0, alp=0.0, epoch=-1):
 
     loss = m_loss + aux_loss + reg_loss
 
-    print('epoch: ', epoch, 'loss: ', loss.item(), 'm_loss: ', m_loss.item(), 'aux_loss: ', aux_loss.item(), 'reg_loss: ', reg_loss.item())
+    print(f"epoch: {epoch}, loss: {loss.item():.3f}, m_loss: {m_loss.item():.3f} aux_loss: {aux_loss.item():.3f}, reg_loss: {reg_loss.item():.3f}")
+    # print('epoch: ', epoch, 'loss: ', loss.item(), 'm_loss: ', m_loss.item(), 'aux_loss: ', aux_loss.item(), 'reg_loss: ', reg_loss.item())
 
     return loss
 
 
+def evaluate(x, adjacency, y):
+    clusters = Birch(n_clusters=None, threshold=0.5).fit_predict(x.cpu().numpy(), y=None)
+    res_B = print_eval(clusters, y, adjacency)
+    cluster_ids,_ = k_means(x, len(np.unique(y)), device='cpu', distance='cosine')
+    res_K = print_eval(cluster_ids, y, adjacency)
+
+    return res_B, res_K
+
 def train(model, optimizer, data, epochs, lam, alp):
     scheduler = lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.1, total_iters=epochs)
     model.train()
+
+    best_B = [0]*6
+    best_K = [0]*6
+    
     for epoch in range(epochs):
         optimizer.zero_grad()
         if args.encoder == 'GCN':
@@ -208,6 +247,12 @@ def train(model, optimizer, data, epochs, lam, alp):
         optimizer.step()
         scheduler.step()
 
+        ep_res_B, ep_res_K = evaluate(out.detach(), torch_sparse_adj.to_dense().cpu().numpy(), data.y.cpu().numpy())
+        if ep_res_B[0] > best_B[0]:
+            best_B = ep_res_B
+        if ep_res_K[0] > best_K[0]:
+            best_K = ep_res_K
+    return best_B, best_K
 
 if __name__ == '__main__':
     args = parse_args()
@@ -219,13 +264,6 @@ if __name__ == '__main__':
     base_model = args.base_model
     seed = args.seed
 
-    # if results exist then skip
-    # if alp == 0.0 and os.path.exists(f'results/results_{dataset_name}_{lam}_{epochs}_{base_model}_{seed}.pt'):
-    #     print(f'results/results_{dataset_name}_{lam}_{epochs}_{base_model}_{seed}.pt exists. Skipping...')
-    #     exit()
-    # elif alp != 0.0 and os.path.exists(f'results/results_{dataset_name}_{lam}_{alp}_{epochs}_{base_model}_{seed}.pt'):
-    #     print(f'results/results_{dataset_name}_{lam}_{alp}_{epochs}_{base_model}_{seed}.pt exists. Skipping...')
-    #     exit()
 
     torch.manual_seed(seed)
     random.seed(seed)
@@ -242,8 +280,7 @@ if __name__ == '__main__':
     transform = T.NormalizeFeatures()
 
     # load dataset
-    dataset = load_dataset(dataset_name)
-    data = dataset[0]
+    data = load_dataset(dataset_name)
     data = data.to(device)
 
     # preprocessing
@@ -265,6 +302,7 @@ if __name__ == '__main__':
     total_res_B = []
     total_res_K = []
     for fold in range(5):
+        print('*'*20, f' fold-{fold} ', '*'*20)
         if args.encoder == 'GCN':
             model = GNN(in_dim, out_dim, base_model=base_model).to(device)
         elif args.encoder == 'low_pass':
@@ -284,71 +322,44 @@ if __name__ == '__main__':
         lr = 1e-3
         optimizer = getattr(torch.optim, optimizer_name)(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=0.001, amsgrad=True)
 
-        print('#'*60)
-        print('training...')
-        print('#'*60)
-        train(model, optimizer, data, epochs, lam, alp)
+        print('*'*20, ' training...')
+        res_B, res_K = train(model, optimizer, data, epochs, lam, alp)
+        total_res_B.append(res_B)
+        total_res_K.append(res_K)
 
-        print('#'*60)
-        print('testing...')
-        print('#'*60)
-        test_data = data.clone()
-        print(test_data)
+        # test_data = data.clone()
+        # print(test_data)
 
-        model.eval()
-        if args.encoder == 'GCN':
-            x = model(test_data)
-        elif args.encoder == 'low_pass':
-            out = model(data.x)
-            x = F.normalize(out)
+        # model.eval()
+        # if args.encoder == 'GCN':
+        #     x = model(test_data)
+        # elif args.encoder == 'low_pass':
+        #     out = model(data.x)
+        #     x = F.normalize(out)
 
 
-        print('#'*60)
-        print('evaluating...')
-        print('#'*60)
-        clusters = Birch(n_clusters=None, threshold=0.5).fit_predict(x.detach().cpu().numpy(), y=None)
-        FQ = utils.compute_fast_modularity(clusters, num_nodes, num_edges, torch_sparse_adj, degree, device)
-        # print('No of clusters: ', max(clusters) + 1)
-        # print('Modularity:', FQ)
 
-        # NMI = utils.compute_nmi(clusters, data.y.squeeze().cpu().numpy())
-        # print('NMI:', NMI)
 
-        # conductance = utils.compute_conductance(clusters, Graph)
-        # avg_conductance = sum(conductance) / len(conductance)
-        # print('conductance', avg_conductance * 100)
 
-        # f1_score = utils.sample_f1_score(test_data, clusters, num_nodes)
-        # print('Sample_F1_score:', f1_score)
+        # print('*'*20, ' evaluating...')
+        # clusters = Birch(n_clusters=None, threshold=0.5).fit_predict(x.detach().cpu().numpy(), y=None)
+        # # FQ = utils.compute_fast_modularity(clusters, num_nodes, num_edges, torch_sparse_adj, degree, device)
 
-        # results = {
-        #     'num_clusters': np.unique(clusters).shape[0],
-        #     'modularity': FQ,
-        #     'nmi': NMI,
-        #     'conductance': avg_conductance,
-        #     'sample_f1_score': f1_score
-        # }
-
-        import sys, pdb
-        sys.path.append('../dgc')
-        from clustering import k_means
-        from eval import print_eval, modularity
-        from scipy.sparse import csr_matrix, coo_matrix
-        adjacency = coo_matrix((np.ones((data.edge_index.shape[1])), 
-                            (data.edge_index[0].cpu().numpy(), data.edge_index[1].cpu().numpy()))).toarray()
-        print('our eval func: ', end='')
-        res_Birch = print_eval(clusters, data.y.cpu().numpy(), adjacency)
-        total_res_B.append(res_Birch)
+        # adjacency = torch_sparse_adj.to_dense().cpu().numpy()
+        # print('Birch: \t', end='')
+        # res_Birch = print_eval(clusters, data.y.cpu().numpy(), adjacency)
+        # total_res_B.append(res_Birch)
         
-        print('kmeans: ', end='')
-        cluster_ids,_ = k_means(x.detach(), len(np.unique(data.y.cpu().numpy())), device='cpu', distance='cosine')
-        res = print_eval(cluster_ids, data.y.cpu().numpy(), adjacency)
-        total_res_K.append(res)
+        # print('kmeans: \t', end='')
+        # cluster_ids,_ = k_means(x.detach(), len(np.unique(data.y.cpu().numpy())), device='cpu', distance='cosine')
+        # res = print_eval(cluster_ids, data.y.cpu().numpy(), adjacency)
+        # total_res_K.append(res)
 
 
-print('end time:', datetime.now())
 total_time = time.time() - start_time
 print('total time:', total_time)
+print('end time:', datetime.now())
+
 
 log_file = 'res_log.txt'
 log_fold_file = 'res_fold_log.txt'
@@ -357,6 +368,15 @@ log_fold_file_B = 'res_Birch_fold_log.txt'
 print(f"save res to {log_file} and {log_fold_file}, Birch res to {log_file_B} and {log_fold_file_B}")
 
 total_res = np.array(total_res_K)
+print(total_res)
+print('***** final result: *****')
+print('%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n'%(args.dataset, 
+    total_res[:, 0].mean()*100, total_res[:, 0].std()*100, 
+    total_res[:, 1].mean()*100, total_res[:, 1].std()*100, 
+    total_res[:, 2].mean()*100, total_res[:, 2].std()*100, 
+    total_res[:, 3].mean()*100, total_res[:, 3].std()*100, 
+    total_res[:, 4].mean()*100, total_res[:, 4].std()*100, 
+    total_res[:, 5].mean()*100, total_res[:, 5].std()*100))
 
 with open(log_file, 'a+') as f:
     # if the file is empty, write the header
@@ -373,10 +393,30 @@ with open(log_file, 'a+') as f:
 with open(log_fold_file, 'a+') as f:
     # if the file is empty, write the header
     if os.path.getsize(log_fold_file) == 0:
-        f.write('norm, layers, alpha, S_alpha, ssg0, ssg1, ssg2, ssg3, ')
         f.write('dataset, fold, acc_mean, nmi_mean, ari_mean, f1_mean, mod_mean, con_mean, time\n')
     for i in range(total_res.shape[0]):
-        f.write(', '.join([str(x) for x in [args.norm, args.top_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3]])+', ')
+        f.write('%s, %d, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n'%(args.dataset, i, 
+            total_res[i, 0]*100, total_res[i, 1]*100, total_res[i, 2]*100, total_res[i, 3]*100, total_res[i, 4]*100, total_res[i, 5]*100, total_time))
+
+
+total_res = np.array(total_res_B)
+with open(log_file_B, 'a+') as f:
+    # if the file is empty, write the header
+    if os.path.getsize(log_file_B) == 0:
+        f.write('dataset, acc_mean, acc_std, nmi_mean, nmi_std, ari_mean, ari_std, f1_mean, f1_std, mod_mean, mod_std, con_mean, con_std, time\n')
+    f.write('%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n'%(args.dataset, 
+        total_res[:, 0].mean()*100, total_res[:, 0].std()*100, 
+        total_res[:, 1].mean()*100, total_res[:, 1].std()*100, 
+        total_res[:, 2].mean()*100, total_res[:, 2].std()*100, 
+        total_res[:, 3].mean()*100, total_res[:, 3].std()*100, 
+        total_res[:, 4].mean()*100, total_res[:, 4].std()*100, 
+        total_res[:, 5].mean()*100, total_res[:, 5].std()*100, total_time))
+    
+with open(log_fold_file_B, 'a+') as f:
+    # if the file is empty, write the header
+    if os.path.getsize(log_fold_file_B) == 0:
+        f.write('dataset, fold, acc_mean, nmi_mean, ari_mean, f1_mean, mod_mean, con_mean, time\n')
+    for i in range(total_res.shape[0]):
         f.write('%s, %d, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n'%(args.dataset, i, 
             total_res[i, 0]*100, total_res[i, 1]*100, total_res[i, 2]*100, total_res[i, 3]*100, total_res[i, 4]*100, total_res[i, 5]*100, total_time))
 

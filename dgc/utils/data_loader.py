@@ -44,6 +44,8 @@ def load_graph_data(root_path=".", dataset_name="dblp", show_details=False):
             data = WikipediaNetwork(root=root_path+'pyg', name=dataset_name)
         elif dataset_name== "wisc":
             data = WebKB(root=root_path+'pyg', name="Wisconsin")
+        else:
+            raise NotImplementedError("The dataset is not supported")
         data = data[0]
 
         feat = data.x.numpy()

@@ -37,13 +37,13 @@ device=$2
 norm=$3
 layer=$4
 
-for alpha in 0.8
+for alpha in 0.8 0.5 0.2
 do
     for S_alpha in 0.8 0.5 0.2
     do
         for ssg0 in 0.0001 0.0006 0.001
         do
-            for ssg1 in 0.0001 0.0006 0.001 0.006 
+            for ssg1 in 0.00001 0.0001 0.0006 0.001 0.006 
             do
                 python my_train_snapshot.py --dataset ${data} --epochs 500 --norm $norm --device ${device} \
                 --top_layers $layer --top_alpha $alpha --top_prop sgc --top_linear_trans 1 \

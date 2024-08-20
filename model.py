@@ -475,21 +475,21 @@ class low_pass_model(nn.Module):
 
 
 class pool_based_model(nn.Module):
-    def __init__(self, args, input_dim, hidden_dim, cluster_num, low_pass_filter):
+    def __init__(self, encoder, input_dim, hidden_dim, cluster_num, dropout, low_pass_filter, args):
         super(pool_based_model, self).__init__()
-        self.args = args
-        if args.encoder == 'GCN':
+        self.encoder = encoder
+        if encoder == 'GCN':
             self.encoding = GCNConv(input_dim, hidden_dim)
-        elif args.encoder == 'low_pass':
+        elif encoder == 'low_pass':
             self.encoding = low_pass_model(args, low_pass_filter, input_dim, hidden_dim)
         else:
             raise NotImplementedError    
-        self.dmon_pool = DMoNPooling(hidden_dim, cluster_num)
+        self.dmon_pool = DMoNPooling(hidden_dim, cluster_num, dropout=dropout)
     
     def forward(self, X, A, edge_index):
-        if self.args.encoder == 'GCN':
+        if self.encoder == 'GCN':
             H = self.encoding(X, edge_index)
-        elif self.args.encoder == 'low_pass':
+        elif self.encoder == 'low_pass':
             H = self.encoding(X)
         s, out, out_adj, spectral_loss, ortho_loss, cluster_loss = self.dmon_pool(H, A)
         # remove the dimension for graph level
