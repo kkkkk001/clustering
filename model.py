@@ -253,7 +253,7 @@ class top_agg(nn.Module):
         if self.linear_prop == 'sgc':
             x = self.fc(self.top_filter @ x)
             # x = (x - x.mean(0)) / x.std(0) / torch.sqrt(torch.tensor(x.shape[1]).to(x.device))
-            x = F.normalize(x, p=2, dim=1)
+            # x = F.normalize(x, p=2, dim=1)
         elif self.linear_prop == 'gcn':
             for lin in self.lins[:-1]:
                 x = lin(self.top_filter @ x)
@@ -322,7 +322,7 @@ class attr_agg(nn.Module):
         if self.linear_prop == 'sgc':
             x = self.fc(self.attr_filter @ x)
             # x = (x - x.mean(0)) / x.std(0) / torch.sqrt(torch.tensor(x.shape[1]).to(x.device))
-            x = F.normalize(x, p=2, dim=1)
+            # x = F.normalize(x, p=2, dim=1)
         elif self.linear_prop == 'gcn':
             for lin in self.lins[:-1]:
                 x = lin(self.attr_filter @ x)

@@ -27,6 +27,16 @@ from torch.optim.lr_scheduler import CyclicLR
 
 
 
+def spectral_clu(H, cluster_num):
+    from sklearn.cluster import SpectralClustering
+    clustering = SpectralClustering(n_clusters=cluster_num, assign_labels='kmeans').fit(H)
+    cluster_id = clustering.labels_
+    cluster_centers = np.zeros((cluster_num, H.shape[1]))
+    for i in range(cluster_num):
+        cluster_centers[i] = H[cluster_id==i].mean(0)
+    return cluster_id, cluster_centers
+
+
 
 parser = argparse.ArgumentParser(description='my_model')
 ### training params ###
@@ -40,6 +50,10 @@ parser.add_argument('--a_wd', type=float, default=5e-4, help='')
 parser.add_argument('--device', type=str, default='cuda', help='device')
 parser.add_argument('--dropout', type=float, default=0.0, help='')
 parser.add_argument('--norm', type=int, default=0, help='')
+parser.add_argument('--svd', type=int, default=1, help='if 1, svd on S_norm and A_norm, if 0, lin on S and A')
+parser.add_argument('--post_process', type=str, default='l2-norm', help='if l2-norm, l2 normalization npn Ht and HA before fusion, if none, no post process')
+
+
 
 ### top_agg params ###
 parser.add_argument('--top_layers', type=int, default=5, help='')
@@ -66,6 +80,7 @@ parser.add_argument('--xprop_alpha', type=float, default=0.5, help='')
 ### C_prop params ###
 parser.add_argument('--cprop_layers', type=int, default=5, help='')
 parser.add_argument('--cprop_alpha', type=float, default=0.2, help='')
+parser.add_argument('--cprop_abl', type=int, default=0, help='')
 
 
 ### DeProp params ###
@@ -133,12 +148,19 @@ def train():
         optimizer_t.zero_grad()
         optimizer_a.zero_grad()
 
+        if args.svd == 0:
+            US_norm = lint(US_norm_)
+            UA_norm = lina(UA_norm_)
 
         if args.top_prop == 'deprop':
             H_t = model(US_norm, edge_index)
         else:
             H_t = model(US_norm)
         H_a = attr_model(UA_norm)
+
+        if args.post_process == 'l2-norm':
+            H_t = F.normalize(H_t, p=2, dim=1)
+            H_a = F.normalize(H_a, p=2, dim=1)
 
         H = fusion_attr(H_t, H_a) 
         # check if H contains nan
@@ -157,7 +179,11 @@ def train():
 
         C0 = cluster_id2assignment(cluster_ids, cluster_num).to(args.device)
         # C = Cprop(C0, A, args)
-        C = C_prop_model(C0)
+        if args.cprop_abl == 1:
+            print('cprop_abl')
+            C = C0
+        else:
+            C = C_prop_model(C0)
         # C = C0
         C = F.normalize(C, p=2, dim=1)
 
@@ -205,6 +231,8 @@ def train():
 
 
 
+
+retain_grah=True 
 total_res = []
 # final result is the mean of 5 repeated experiments
 for fold in range(5):
@@ -226,12 +254,16 @@ for fold in range(5):
     attr_model = attr_agg(X, args.attr_alpha, args.attr_layers, args.hidden_dim, args.hidden_dim, args.attr_r, linear_prop=args.attr_prop, linear_trans=args.attr_linear_trans).to(args.device)
     fusion_attr = fusion(args.fusion_method, args.fusion_beta, args.hidden_dim).to(args.device)
     
-    
-    optimizer_t = torch.optim.Adam(list(model.parameters()), lr=args.t_lr, weight_decay=args.t_wd)
-    optimizer_a = torch.optim.Adam(list(attr_model.parameters()), lr=args.a_lr, weight_decay=args.a_wd)
-
-
     C_prop_model = C_agg(args.cprop_alpha, args.cprop_layers, A).to(args.device)
+
+
+    lint = nn.Linear(X.shape[0], args.hidden_dim).to(args.device)
+    lina = nn.Linear(X.shape[0], args.hidden_dim).to(args.device)
+
+
+    optimizer_t = torch.optim.Adam(list(model.parameters())+list(lint.parameters()), lr=args.t_lr, weight_decay=args.t_wd)
+    optimizer_a = torch.optim.Adam(list(attr_model.parameters())+list(lina.parameters()), lr=args.a_lr, weight_decay=args.a_wd)
+
 
     ##### compute low rank X_prop #####
     X_prop = X_norm
@@ -241,47 +273,39 @@ for fold in range(5):
     X_prop = U @ torch.diag(S)
     X_prop = F.normalize(X_prop, p=2, dim=1)
 
-    ##### test the clustering quality on initial X #####
+
+    ##### compute low rank US_norm and UA_norm #####
+    if args.svd == 1:
+        US_norm, _, _ = torch.svd_lowrank(attr_model.attr_simi_mtx, q=args.hidden_dim, niter=7)
+        UA_norm, _, _ = torch.svd_lowrank(A, q=args.hidden_dim, niter=7)
+    elif args.svd == 0:
+        US_norm_ = X@X.t()
+        UA_norm_ = org_adj 
+        US_norm = lint(US_norm_)
+        UA_norm = lina(UA_norm_)
+
+
+
+    ##### test init clustering quality #####
+    ##### on X #####
     print('clustering results on initial X:\t', end=' ')
     cluster_ids,_ = k_means(X, cluster_num, device='cpu', distance='cosine')
     print_eval(cluster_ids, true_labels, A.cpu().numpy())   
 
-
-    ##### test the clustering quality on initial X_prop #####
+    ##### on X_prop #####
     print('clustering results on initial X_prop:\t', end=' ')
     cluster_ids,centers = k_means(X_prop.detach(), cluster_num, device='cpu', distance='cosine')
     print_eval(cluster_ids, true_labels, A.cpu().numpy())  
 
-
-
-    ##### compute the low rank X and A_norm #####
-    US_norm, _, _ = torch.svd_lowrank(attr_model.attr_simi_mtx, q=args.hidden_dim, niter=7)
-    UA_norm, _, _ = torch.svd_lowrank(A, q=args.hidden_dim, niter=7)
-
-
+    ##### on H_t #####
     print('clustering results on initial H_t:\t', end=' ')
     cluster_ids,centers = k_means((model.top_filter @ US_norm).detach(), cluster_num, device='cpu', distance='cosine')
     print_eval(cluster_ids, true_labels, A.cpu().numpy()) 
 
+    ##### on H_a #####
     print('clustering results on initial H_a:\t', end=' ')
     cluster_ids,centers = k_means((attr_model.attr_filter @ UA_norm).detach(), cluster_num, device='cpu', distance='cosine')
     print_eval(cluster_ids, true_labels, A.cpu().numpy())  
-
-
-    def test1(alpha, layer):
-        model1 = top_agg(A, alpha, layer, args.hidden_dim, args.hidden_dim, linear_prop=args.top_prop, linear_trans=args.top_linear_trans).to(args.device)
-        emb = model1.top_filter @ US_norm
-        cluster_ids,centers = k_means(emb.detach(), cluster_num, device='cpu', distance='cosine')
-        print_eval(cluster_ids, true_labels, A.cpu().numpy())  
-
-
-    def test2(alpha, layer, attr_r):
-        model1 = attr_agg(A, alpha, layer, args.hidden_dim, args.hidden_dim, attr_r, linear_prop=args.top_prop, linear_trans=args.top_linear_trans).to(args.device)
-        emb = model1.attr_filter @ UA_norm
-        cluster_ids,centers = k_means(emb.detach(), cluster_num, device='cpu', distance='cosine')
-        print_eval(cluster_ids, true_labels, A.cpu().numpy()) 
-
-    # pdb.set_trace()
 
 
     ##### training and evaluation #####
@@ -312,9 +336,9 @@ print('total time:', total_time)
 with open(args.log_file, 'a+') as f:
     # if the file is empty, write the header
     if os.path.getsize(args.log_file) == 0:
-        f.write('norm, layers, alpha, S_alpha, ssg0, ssg1, ssg2, ssg3, ')
+        f.write('norm, layers, attr_layers, alpha, S_alpha, ssg0, ssg1, ssg2, ssg3, fusion_beta, cprop_abl, ')
         f.write('dataset, acc_mean, acc_std, nmi_mean, nmi_std, ari_mean, ari_std, f1_mean, f1_std, mod_mean, mod_std, con_mean, con_std, time\n')
-    f.write(', '.join([str(x) for x in [args.norm, args.top_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3]])+', ')
+    f.write(', '.join([str(x) for x in [args.norm, args.top_layers, args.attr_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3, args.fusion_beta, args.cprop_abl]])+', ')
     f.write('%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n'%(args.dataset, 
         total_res[:, 0].mean()*100, total_res[:, 0].std()*100, 
         total_res[:, 1].mean()*100, total_res[:, 1].std()*100, 
@@ -327,11 +351,11 @@ with open(args.log_file, 'a+') as f:
 # save the result of each fold
 with open(args.log_fold_file, 'a+') as f:
     # if the file is empty, write the header
-    if os.path.getsize(args.log_file) == 0:
-        f.write('norm, layers, alpha, S_alpha, ssg0, ssg1, ssg2, ssg3, ')
+    if os.path.getsize(args.log_fold_file) == 0:
+        f.write('norm, layers, attr_layers, alpha, S_alpha, ssg0, ssg1, ssg2, ssg3, fusion_beta, cprop_abl, ')
         f.write('dataset, fold, acc_mean, nmi_mean, ari_mean, f1_mean, mod_mean, con_mean, time\n')
     for i in range(total_res.shape[0]):
-        f.write(', '.join([str(x) for x in [args.norm, args.top_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3]])+', ')
+        f.write(', '.join([str(x) for x in [args.norm, args.top_layers, args.attr_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3, args.fusion_beta, args.cprop_abl]])+', ')
         f.write('%s, %d, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n'%(args.dataset, i, 
             total_res[i, 0]*100, total_res[i, 1]*100, total_res[i, 2]*100, total_res[i, 3]*100, total_res[i, 4]*100, total_res[i, 5]*100, total_time))
    
