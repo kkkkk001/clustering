@@ -148,6 +148,8 @@ def train():
         optimizer_t.zero_grad()
         optimizer_a.zero_grad()
 
+        if args.svd == 1:
+            global US_norm, UA_norm
         if args.svd == 0:
             US_norm = lint(US_norm_)
             UA_norm = lina(UA_norm_)
@@ -159,6 +161,7 @@ def train():
         H_a = attr_model(UA_norm)
 
         if args.post_process == 'l2-norm':
+            print('l2-norm')
             H_t = F.normalize(H_t, p=2, dim=1)
             H_a = F.normalize(H_a, p=2, dim=1)
 
@@ -218,7 +221,7 @@ def train():
         print('epoch: %d , loss: %.2f, loss_kmeans: %.2f, loss_prop: %.2f, ort_loss: %.2f, loss_inv: %.2f' % (e, loss.item(), loss_kmeans.item(), loss_prop, ort_loss, inv_loss), end=' ')
         print('inv_loss1: %.2f, inv_loss2: %.2f, inv_loss3: %.2f' % (inv_loss_o, inv_loss_n, inv_loss_c), end=' ')
         predict_labels = torch.argmax(C, dim=1)
-        res = print_eval(predict_labels.cpu().numpy(), true_labels, A.cpu().numpy())
+        res = print_eval(predict_labels.cpu().numpy(), true_labels, org_adj.cpu().numpy())
         
 
         ## best acc
@@ -240,6 +243,9 @@ for fold in range(5):
     print("#"*60)
     print("#"*26, ' fold:%d ' % fold, "#"*26)
     print("#"*60)
+
+
+
 
 
     #### define model and optimizer #####
@@ -285,27 +291,26 @@ for fold in range(5):
         UA_norm = lina(UA_norm_)
 
 
-
     ##### test init clustering quality #####
     ##### on X #####
     print('clustering results on initial X:\t', end=' ')
     cluster_ids,_ = k_means(X, cluster_num, device='cpu', distance='cosine')
-    print_eval(cluster_ids, true_labels, A.cpu().numpy())   
+    print_eval(cluster_ids, true_labels, org_adj.cpu().numpy())   
 
     ##### on X_prop #####
     print('clustering results on initial X_prop:\t', end=' ')
     cluster_ids,centers = k_means(X_prop.detach(), cluster_num, device='cpu', distance='cosine')
-    print_eval(cluster_ids, true_labels, A.cpu().numpy())  
+    print_eval(cluster_ids, true_labels, org_adj.cpu().numpy())  
 
     ##### on H_t #####
     print('clustering results on initial H_t:\t', end=' ')
     cluster_ids,centers = k_means((model.top_filter @ US_norm).detach(), cluster_num, device='cpu', distance='cosine')
-    print_eval(cluster_ids, true_labels, A.cpu().numpy()) 
+    print_eval(cluster_ids, true_labels, org_adj.cpu().numpy()) 
 
     ##### on H_a #####
     print('clustering results on initial H_a:\t', end=' ')
     cluster_ids,centers = k_means((attr_model.attr_filter @ UA_norm).detach(), cluster_num, device='cpu', distance='cosine')
-    print_eval(cluster_ids, true_labels, A.cpu().numpy())  
+    print_eval(cluster_ids, true_labels, org_adj.cpu().numpy())  
 
 
     ##### training and evaluation #####
@@ -332,13 +337,14 @@ print(total_res)
 total_time = time.time() - start_time
 print('total time:', total_time)
 
+
 # save the result
 with open(args.log_file, 'a+') as f:
     # if the file is empty, write the header
     if os.path.getsize(args.log_file) == 0:
-        f.write('norm, layers, attr_layers, alpha, S_alpha, ssg0, ssg1, ssg2, ssg3, fusion_beta, cprop_abl, ')
+        f.write('norm, layers, attr_layers, alpha, S_alpha, ssg0, ssg1, ssg2, ssg3, fusion_beta, cprop_abl, svd, post_process, ')
         f.write('dataset, acc_mean, acc_std, nmi_mean, nmi_std, ari_mean, ari_std, f1_mean, f1_std, mod_mean, mod_std, con_mean, con_std, time\n')
-    f.write(', '.join([str(x) for x in [args.norm, args.top_layers, args.attr_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3, args.fusion_beta, args.cprop_abl]])+', ')
+    f.write(', '.join([str(x) for x in [args.norm, args.top_layers, args.attr_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3, args.fusion_beta, args.cprop_abl, args.svd]])+', '+args.post_process+', ')
     f.write('%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n'%(args.dataset, 
         total_res[:, 0].mean()*100, total_res[:, 0].std()*100, 
         total_res[:, 1].mean()*100, total_res[:, 1].std()*100, 
@@ -352,14 +358,15 @@ with open(args.log_file, 'a+') as f:
 with open(args.log_fold_file, 'a+') as f:
     # if the file is empty, write the header
     if os.path.getsize(args.log_fold_file) == 0:
-        f.write('norm, layers, attr_layers, alpha, S_alpha, ssg0, ssg1, ssg2, ssg3, fusion_beta, cprop_abl, ')
+        f.write('norm, layers, attr_layers, alpha, S_alpha, ssg0, ssg1, ssg2, ssg3, fusion_beta, cprop_abl, svd, post_process, ')
         f.write('dataset, fold, acc_mean, nmi_mean, ari_mean, f1_mean, mod_mean, con_mean, time\n')
     for i in range(total_res.shape[0]):
-        f.write(', '.join([str(x) for x in [args.norm, args.top_layers, args.attr_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3, args.fusion_beta, args.cprop_abl]])+', ')
+        f.write(', '.join([str(x) for x in [args.norm, args.top_layers, args.attr_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3, args.fusion_beta, args.cprop_abl, args.svd]])+', '+args.post_process+', ')
         f.write('%s, %d, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n'%(args.dataset, i, 
             total_res[i, 0]*100, total_res[i, 1]*100, total_res[i, 2]*100, total_res[i, 3]*100, total_res[i, 4]*100, total_res[i, 5]*100, total_time))
-   
 
 
 
 print('end time:', datetime.now())
+
+
