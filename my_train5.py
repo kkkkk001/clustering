@@ -130,12 +130,13 @@ cluster_num = len(np.unique(true_labels))
 
 edge_index = torch.LongTensor(np.array(A.nonzero())).to(args.device)
 A = torch.FloatTensor(A).to(args.device)
-org_adj = A
-A = normalize_adj_torch(A, self_loop=True, symmetry=True)
+A_norm = normalize_adj_torch(A, self_loop=True, symmetry=True)
+
 X = torch.FloatTensor(X).to(args.device)
 X_norm = F.normalize(X, p=2, dim=1)
 
-
+S = compute_attr_simi_mtx(X, args.attr_r).to(args.device)
+S_norm = normalize_adj_torch(S, self_loop=False, symmetry=True).to(args.device)
 
 
 def train():
@@ -154,10 +155,8 @@ def train():
             US_norm = lint(US_norm_)
             UA_norm = lina(UA_norm_)
 
-        if args.top_prop == 'deprop':
-            H_t = model(US_norm, edge_index)
-        else:
-            H_t = model(US_norm)
+
+        H_t = model(US_norm)
         H_a = attr_model(UA_norm)
 
         if args.post_process == 'l2-norm':
@@ -205,7 +204,7 @@ def train():
         # inv_loss_o = args.loss_lambda_SSG1 * (H_t_norm - H_a_norm).pow(2).sum()
         inv_loss_o = args.loss_lambda_SSG1 * F.mse_loss(H_t_norm, H_a_norm)
         # inv_loss_o = args.loss_lambda_SSG1 * (H_t_norm - H_a_norm).norm(p=2, dim=1).mean()
-        inv_loss_n = args.loss_lambda_SSG2 * (node_t_neighbor_a_loss_fn2(H_t_norm, H_a_norm, A_ori=org_adj) + node_t_neighbor_a_loss_fn2(H_a_norm, H_t_norm, A_ori=org_adj))
+        inv_loss_n = args.loss_lambda_SSG2 * (node_t_neighbor_a_loss_fn2(H_t_norm, H_a_norm, A_ori=A) + node_t_neighbor_a_loss_fn2(H_a_norm, H_t_norm, A_ori=A))
         print(C.sum(0).mean(), C.sum(0).max())
         inv_loss_c = args.loss_lambda_SSG3 * (node_t_cluster_a_loss_fn2(H_t_norm, H_a_norm, C) + node_t_cluster_a_loss_fn2(H_a_norm, H_t_norm, C))
         inv_loss = inv_loss_o + inv_loss_n + inv_loss_c
@@ -221,7 +220,7 @@ def train():
         print('epoch: %d , loss: %.2f, loss_kmeans: %.2f, loss_prop: %.2f, ort_loss: %.2f, loss_inv: %.2f' % (e, loss.item(), loss_kmeans.item(), loss_prop, ort_loss, inv_loss), end=' ')
         print('inv_loss1: %.2f, inv_loss2: %.2f, inv_loss3: %.2f' % (inv_loss_o, inv_loss_n, inv_loss_c), end=' ')
         predict_labels = torch.argmax(C, dim=1)
-        res = print_eval(predict_labels.cpu().numpy(), true_labels, org_adj.cpu().numpy())
+        res = print_eval(predict_labels.cpu().numpy(), true_labels, A.cpu().numpy())
         
 
         ## best acc
@@ -245,22 +244,13 @@ for fold in range(5):
     print("#"*60)
 
 
-
-
-
     #### define model and optimizer #####
-    if args.top_prop == 'deprop':
-        model = DeProp(in_channels=args.hidden_dim, hidden_channels=args.hidden_dim, 
-                    out_channels=args.hidden_dim, num_layers=args.gnnlayers, orth=True, 
-                    lambda1=args.lambda1, lambda2=args.lambda2, gamma=args.step_size_gamma, 
-                    with_bn=args.with_bn, F_norm=args.F_norm, dropout=args.dropout, lin=args.lin).to(args.device)
-        # model = encoding2(args, X.shape[1], args.hidden_dim, A, args.hidden_dim).to(args.device)
-    else:
-        model = top_agg(A, args.top_alpha, args.top_layers, args.hidden_dim, args.hidden_dim, linear_prop=args.top_prop, linear_trans=args.top_linear_trans).to(args.device)
-    attr_model = attr_agg(X, args.attr_alpha, args.attr_layers, args.hidden_dim, args.hidden_dim, args.attr_r, linear_prop=args.attr_prop, linear_trans=args.attr_linear_trans).to(args.device)
+    model = top_agg(A_norm, args.top_alpha, args.top_layers, args.hidden_dim, args.hidden_dim, linear_prop=args.top_prop, linear_trans=args.top_linear_trans).to(args.device)
+    attr_model = attr_agg(S_norm, args.attr_alpha, args.attr_layers, args.hidden_dim, args.hidden_dim, linear_prop=args.attr_prop, linear_trans=args.attr_linear_trans).to(args.device)
+
     fusion_attr = fusion(args.fusion_method, args.fusion_beta, args.hidden_dim).to(args.device)
     
-    C_prop_model = C_agg(args.cprop_alpha, args.cprop_layers, A).to(args.device)
+    C_prop_model = C_agg(args.cprop_alpha, args.cprop_layers, A_norm).to(args.device)
 
 
     lint = nn.Linear(X.shape[0], args.hidden_dim).to(args.device)
@@ -274,7 +264,7 @@ for fold in range(5):
     ##### compute low rank X_prop #####
     X_prop = X_norm
     for _ in range(args.xprop_layers):
-        X_prop = args.xprop_alpha * torch.spmm(A, X_prop) + X_norm
+        X_prop = args.xprop_alpha * torch.spmm(A_norm, X_prop) + X_norm
     U, S, _ = torch.svd_lowrank(X_prop, q=args.hidden_dim, niter=7)
     X_prop = U @ torch.diag(S)
     X_prop = F.normalize(X_prop, p=2, dim=1)
@@ -282,11 +272,13 @@ for fold in range(5):
 
     ##### compute low rank US_norm and UA_norm #####
     if args.svd == 1:
-        US_norm, _, _ = torch.svd_lowrank(attr_model.attr_simi_mtx, q=args.hidden_dim, niter=7)
-        UA_norm, _, _ = torch.svd_lowrank(A, q=args.hidden_dim, niter=7)
+        US_norm, _, _ = torch.svd_lowrank(S_norm, q=args.hidden_dim, niter=7)
+        UA_norm, _, _ = torch.svd_lowrank(A_norm, q=args.hidden_dim, niter=7)
+        US_norm = model.agg(US_norm)
+        UA_norm = attr_model.agg(UA_norm)
     elif args.svd == 0:
         US_norm_ = X@X.t()
-        UA_norm_ = org_adj 
+        UA_norm_ = A 
         US_norm = lint(US_norm_)
         UA_norm = lina(UA_norm_)
 
@@ -295,22 +287,22 @@ for fold in range(5):
     ##### on X #####
     print('clustering results on initial X:\t', end=' ')
     cluster_ids,_ = k_means(X, cluster_num, device='cpu', distance='cosine')
-    print_eval(cluster_ids, true_labels, org_adj.cpu().numpy())   
+    print_eval(cluster_ids, true_labels, A.cpu().numpy())   
 
     ##### on X_prop #####
     print('clustering results on initial X_prop:\t', end=' ')
     cluster_ids,centers = k_means(X_prop.detach(), cluster_num, device='cpu', distance='cosine')
-    print_eval(cluster_ids, true_labels, org_adj.cpu().numpy())  
+    print_eval(cluster_ids, true_labels, A.cpu().numpy())  
 
     ##### on H_t #####
     print('clustering results on initial H_t:\t', end=' ')
     cluster_ids,centers = k_means((model.top_filter @ US_norm).detach(), cluster_num, device='cpu', distance='cosine')
-    print_eval(cluster_ids, true_labels, org_adj.cpu().numpy()) 
+    print_eval(cluster_ids, true_labels, A.cpu().numpy()) 
 
     ##### on H_a #####
     print('clustering results on initial H_a:\t', end=' ')
     cluster_ids,centers = k_means((attr_model.attr_filter @ UA_norm).detach(), cluster_num, device='cpu', distance='cosine')
-    print_eval(cluster_ids, true_labels, org_adj.cpu().numpy())  
+    print_eval(cluster_ids, true_labels, A.cpu().numpy())  
 
 
     ##### training and evaluation #####

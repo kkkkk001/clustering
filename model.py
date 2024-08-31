@@ -249,9 +249,13 @@ class top_agg(nn.Module):
             raise NotImplementedError
         self.linear_prop = linear_prop
         
+
+    def agg(self, x):
+        return self.top_filter @ x
+
     def forward(self, x):
         if self.linear_prop == 'sgc':
-            x = self.fc(self.top_filter @ x)
+            x = self.fc(x)
             # x = (x - x.mean(0)) / x.std(0) / torch.sqrt(torch.tensor(x.shape[1]).to(x.device))
             # x = F.normalize(x, p=2, dim=1)
         elif self.linear_prop == 'gcn':
@@ -266,37 +270,40 @@ class top_agg(nn.Module):
 
 
 
+def compute_attr_simi_mtx(X, attr_r):
+    ### contruct the attribute similarity matrix ###
+    X_n = F.normalize(X, p=2, dim=1)
+    attr_simi_mtx = (X_n@X_n.t()).to(X.device)
+    attr_simi_mtx[attr_simi_mtx<0] = 0
+    # attr_simi_mtx = attr_simi_mtx - torch.diag_embed(torch.diag(attr_simi_mtx))
+
+    row, col = torch.nonzero(attr_simi_mtx, as_tuple=True)
+    values = attr_simi_mtx[row, col] 
+    _, sort_indices = torch.sort(values, descending=True)
+
+    keep_size = int(attr_r * len(sort_indices))
+    sort_indices = sort_indices[:keep_size]
+
+    values = values[sort_indices]
+    # values = torch.ones_like(values)
+    row = row[sort_indices]
+    col = col[sort_indices]
+    attr_simi_mtx = torch.sparse_coo_tensor(torch.stack((row, col),0), values, attr_simi_mtx.shape)
+    attr_simi_mtx = attr_simi_mtx.to_dense()
+
+    return attr_simi_mtx
+
 
 class attr_agg(nn.Module):
-    def __init__(self, X, alpha, hop, input_dim, hidden_dim, attr_r, linear_prop='sgc', linear_trans=1):
+    def __init__(self, attr_simi_mtx, alpha, hop, input_dim, hidden_dim, linear_prop='sgc', linear_trans=1):
         super(attr_agg, self).__init__()
 
-        ### contruct the attribute similarity matrix ###
-        X_n = F.normalize(X, p=2, dim=1)
-        attr_simi_mtx = (X_n@X_n.t()).to(X.device)
-        attr_simi_mtx[attr_simi_mtx<0] = 0
-        # attr_simi_mtx = attr_simi_mtx - torch.diag_embed(torch.diag(attr_simi_mtx))
-
-        row, col = torch.nonzero(attr_simi_mtx, as_tuple=True)
-        values = attr_simi_mtx[row, col] 
-        _, sort_indices = torch.sort(values, descending=True)
-
-        keep_size = int(attr_r * len(sort_indices))
-        sort_indices = sort_indices[:keep_size]
-
-        values = values[sort_indices]
-        # values = torch.ones_like(values)
-        row = row[sort_indices]
-        col = col[sort_indices]
-        attr_simi_mtx = torch.sparse_coo_tensor(torch.stack((row, col),0), values, attr_simi_mtx.shape)
-        attr_simi_mtx = attr_simi_mtx.to_dense()
-        attr_simi_mtx = normalize_adj_torch(attr_simi_mtx, self_loop=False, symmetry=True)
         self.attr_simi_mtx = attr_simi_mtx
 
         ### setup the linear propagation model ###
         if linear_prop=='sgc':
-            I = torch.eye(attr_simi_mtx.shape[0]).to(X.device)
-            attr_filter = torch.eye(attr_simi_mtx.shape[0]).to(X.device)
+            I = torch.eye(attr_simi_mtx.shape[0]).to(attr_simi_mtx.device)
+            attr_filter = torch.eye(attr_simi_mtx.shape[0]).to(attr_simi_mtx.device)
             for _ in range(hop):
                 attr_filter = alpha * attr_simi_mtx @ attr_filter + I
             self.attr_filter = attr_filter
@@ -314,13 +321,13 @@ class attr_agg(nn.Module):
             raise NotImplementedError
         self.linear_prop = linear_prop
 
+    def agg(self, x):
+        return self.attr_filter @ x
 
-
-        
     def forward(self, x):
         # x = F.normalize(x, p=2, dim=1)
         if self.linear_prop == 'sgc':
-            x = self.fc(self.attr_filter @ x)
+            x = self.fc(x)
             # x = (x - x.mean(0)) / x.std(0) / torch.sqrt(torch.tensor(x.shape[1]).to(x.device))
             # x = F.normalize(x, p=2, dim=1)
         elif self.linear_prop == 'gcn':
