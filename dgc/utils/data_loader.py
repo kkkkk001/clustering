@@ -9,7 +9,7 @@ import torch
 import logging
 import numpy as np
 import scipy.sparse as sp
-from torch_geometric.datasets import Planetoid, TUDataset, KarateClub, WikipediaNetwork, WebKB
+from torch_geometric.datasets import Planetoid, TUDataset, KarateClub, WikipediaNetwork, WebKB, AttributedGraphDataset
 
 
 def load_graph_data(root_path=".", dataset_name="dblp", show_details=False):
@@ -44,11 +44,15 @@ def load_graph_data(root_path=".", dataset_name="dblp", show_details=False):
             data = WikipediaNetwork(root=root_path+'pyg', name=dataset_name)
         elif dataset_name== "wisc":
             data = WebKB(root=root_path+'pyg', name="Wisconsin")
+        elif dataset_name == 'flickr':
+            data = AttributedGraphDataset(root=root_path+'pyg', name='Flickr')
+        elif dataset_name == 'blogcatalog':
+            data = AttributedGraphDataset(root=root_path+'pyg', name='BlogCatalog')
         else:
             raise NotImplementedError("The dataset is not supported")
         data = data[0]
 
-        feat = data.x.numpy()
+        feat = data.x.to_dense().numpy()
         label = data.y.numpy()
         adj_idx = data.edge_index.numpy()
         adj_sp = sp.coo_matrix((np.ones(adj_idx.shape[1]), (adj_idx[0], adj_idx[1])), shape=(feat.shape[0], feat.shape[0]))

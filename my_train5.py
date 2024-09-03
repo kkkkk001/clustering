@@ -265,15 +265,17 @@ for fold in range(5):
     X_prop = X_norm
     for _ in range(args.xprop_layers):
         X_prop = args.xprop_alpha * torch.spmm(A_norm, X_prop) + X_norm
-    U, S, _ = torch.svd_lowrank(X_prop, q=args.hidden_dim, niter=7)
-    X_prop = U @ torch.diag(S)
+    U, s, _ = torch.svd_lowrank(X_prop, q=args.hidden_dim, niter=7)
+    X_prop = U @ torch.diag(s)
     X_prop = F.normalize(X_prop, p=2, dim=1)
 
 
     ##### compute low rank US_norm and UA_norm #####
     if args.svd == 1:
         US_norm, _, _ = torch.svd_lowrank(S_norm, q=args.hidden_dim, niter=7)
+        # US_norm, _, _ = torch.svd_lowrank(S, q=args.hidden_dim, niter=7)
         UA_norm, _, _ = torch.svd_lowrank(A_norm, q=args.hidden_dim, niter=7)
+        # UA_norm, _, _ = torch.svd_lowrank(A, q=args.hidden_dim, niter=7)
         US_norm = model.agg(US_norm)
         UA_norm = attr_model.agg(UA_norm)
     elif args.svd == 0:

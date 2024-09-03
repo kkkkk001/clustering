@@ -270,6 +270,42 @@ class top_agg(nn.Module):
 
 
 
+
+
+
+class top_agg2(nn.Module):
+    def __init__(self, A_norm, alpha, hop, input_dim, hidden_dim, linear_trans=1):
+        super(top_agg2, self).__init__()
+
+        self._top_filter(A_norm, alpha, hop)
+
+        if linear_trans==1:
+            self.fc = nn.Linear(input_dim, hidden_dim)
+        elif linear_trans==0:
+            self.fc = MLP(in_channels=input_dim, hidden_channels=hidden_dim, out_channels=hidden_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True)
+    
+    
+    def _top_filter(self, A_norm, alpha, hop):
+        I = torch.eye(A_norm.shape[0]).to(A_norm.device)
+        top_filter = torch.eye(A_norm.shape[0]).to(A_norm.device)
+        for _ in range(hop):
+            top_filter = alpha * A_norm @ top_filter + I
+        self.top_filter = top_filter
+
+    def agg(self, x):
+        return self.top_filter @ x
+
+    def forward(self, x):
+        x = self.fc(x)
+        
+        return x
+
+
+
+
+
+
+
 def compute_attr_simi_mtx(X, attr_r):
     ### contruct the attribute similarity matrix ###
     X_n = F.normalize(X, p=2, dim=1)
