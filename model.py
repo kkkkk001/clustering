@@ -575,10 +575,11 @@ def node_t_cluster_a_loss_fn(H_t, H_a, C, simi=None, centers=None):
     return loss
 
 
-def node_t_cluster_a_loss_fn2(H_t, H_a, C, simi=None, centers=None):
+def node_t_cluster_a_loss_fn2(H_t, H_a, C, simi=None, centers=None, clu_size=True):
     if centers is None:
         # print(C.sum(0), C.sum(0).mean())
-        # C = F.normalize(C, p=1, dim=0)
+        if clu_size == False:
+            C = F.normalize(C, p=1, dim=0)
         # C = C/C.sum(0).mean()
         centers = C.t() @ H_a # K x d
     predict_labels = torch.argmax(C, dim=1)
