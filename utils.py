@@ -25,6 +25,5 @@ def t(C0, A, args):
 
 
 def hetero_deg(A, label):
-    pdb.set_trace()
     edge_index = np.array(A.nonzero())
     return (label[edge_index[0]] == label[edge_index[1]]).sum()/edge_index.shape[1]

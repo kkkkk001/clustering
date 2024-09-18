@@ -238,7 +238,7 @@ class top_agg(nn.Module):
             if linear_trans==1:
                 self.fc = nn.Linear(input_dim, hidden_dim)
             elif linear_trans==0:
-                self.fc = MLP(in_channels=input_dim, hidden_channels=hidden_dim, out_channels=hidden_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True)
+                self.fc = MLP(in_channels=input_dim, hidden_channels=512, out_channels=hidden_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True)
         elif linear_prop=='gcn':
             self.top_filter = A_norm
             self.lins = ModuleList()
@@ -346,7 +346,7 @@ class attr_agg(nn.Module):
             if linear_trans==1:
                 self.fc = nn.Linear(input_dim, hidden_dim)
             elif linear_trans==0:
-                self.fc = MLP(in_channels=input_dim, hidden_channels=hidden_dim, out_channels=hidden_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True)
+                self.fc = MLP(in_channels=input_dim, hidden_channels=512, out_channels=hidden_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True)
         elif linear_prop=='gcn':
             self.attr_filter = attr_simi_mtx
             self.lins = ModuleList()
@@ -579,6 +579,7 @@ def node_t_cluster_a_loss_fn2(H_t, H_a, C, simi=None, centers=None, clu_size=Tru
     if centers is None:
         # print(C.sum(0), C.sum(0).mean())
         if clu_size == False:
+            print('clu_size is False')
             C = F.normalize(C, p=1, dim=0)
         # C = C/C.sum(0).mean()
         centers = C.t() @ H_a # K x d
@@ -725,3 +726,49 @@ def DePropagate(C, C0, A, gamma, alphaC, alphaO):
     s = gamma * alphaC * torch.spmm(A, C)
     t = gamma * alphaO * C @ (C.t() @ C)
     return z + s - t + gamma*C0
+
+
+
+class preprocess_SA(nn.Module):
+    """preprocess S or A, used as input to following model and attr_model
+    args:
+        model (str): svd on S or A, lin(ear) on S or A, or mlp on S or A
+        dims (list): [hidden_dim] for svd, [input_dim, hidden_dim] for lin, [input_dim, hidden_dim1, hidden_dim2, ..., hidden_dimn] for mlp
+    """
+    def __init__(self, model, dims):
+        super(preprocess_SA, self).__init__()
+        self.model = model
+        self.dims = dims
+        if self.model == 'lin':
+            self.fc = nn.Linear(dims[0], dims[1])
+        elif self.model == 'mlp':
+            self.fc = MLP(dims, batch_norm=False, dropout=0.0, bias=True)
+    def forward(self, x):
+        if self.model == 'svd':
+            U, s, _ = torch.svd_lowrank(x, q=self.dims[0], niter=7)
+            return U 
+        else:
+            return self.fc(x)
+
+
+class pre_process_x(nn.Module):
+    """preprocess X, used in the reconstruction loss
+    args: 
+        model (str): svd on smoothed X, lin(ear) on smoothed X, or mlp on smoothed X
+        dims (list): [hidden_dim] for svd, [input_dim, hidden_dim] for lin, [input_dim, hidden_dim1, hidden_dim2, ..., hidden_dimn] for mlp
+    """
+    def __init__(self, model, dims):
+
+        super(pre_process_x, self).__init__()
+        self.model = model
+        self.dims = dims
+        if model == 'lin':
+            self.fc = nn.Linear(dims[0], dims[1])
+        elif model == 'mlp':
+            self.fc = MLP(dims, batch_norm=False, dropout=0.0, bias=True)
+    def forward(self, x):
+        if self.model == 'svd':
+            U, s, _ = torch.svd_lowrank(x, q=self.dims[0], niter=7)
+            return U @ torch.diag(s)
+        else:
+            return self.fc(x)

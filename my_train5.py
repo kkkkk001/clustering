@@ -24,6 +24,7 @@ cos_sim = nn.CosineSimilarity(dim=1, eps=1e-6)
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.cluster import KMeans
 from torch.optim.lr_scheduler import CyclicLR
+from torch_geometric.nn.models.mlp import MLP
 
 
 
@@ -41,6 +42,7 @@ def spectral_clu(H, cluster_num):
 parser = argparse.ArgumentParser(description='my_model')
 ### training params ###
 parser.add_argument('--dataset', type=str, default='cora', help="name of dataset")
+parser.add_argument('--input_dim', type=int, default=64, help="hidden dimension")
 parser.add_argument('--hidden_dim', type=int, default=64, help="hidden dimension")
 parser.add_argument('--epochs', type=int, default=300, help='Number of epochs to train.')
 parser.add_argument('--t_lr', type=float, default=1e-3, help='Initial learning rate.')
@@ -110,12 +112,14 @@ parser.add_argument('--loss_lambda_SSG2', type=float, default=0.01, help='')
 parser.add_argument('--loss_lambda_SSG3', type=float, default=0.01, help='')
 parser.add_argument('--temperature', type=float, default=1, help='') 
 parser.add_argument('--clu_size', type=strtobool, default=True, help='') 
+parser.add_argument('--rounding', type=strtobool, default=False, help='') 
 
 
 ### log params ###
 parser.add_argument('--log_file', type=str, default=None, help='')
 parser.add_argument('--log_fold_file', type=str, default=None, help='')
 parser.add_argument('--log_title', type=strtobool, default=True, help='')
+parser.add_argument('--fold', type=str, default='0-1-2-3-4', help='num of repeats, and seed of each repeat, separated by -')
 
 
 args = parser.parse_args()
@@ -180,13 +184,24 @@ def train():
             pdb.set_trace()
 
 
-        loss_prop = args.loss_lambda_prop * torch.pow(1 - cos_sim(H, X_prop), args.sharpening).mean()
+        loss_prop = torch.pow(1 - cos_sim(H, X_prop), args.sharpening).mean()
 
-        if e == 0:
-            cluster_ids,centers_xprop = k_means(X_prop.detach().cpu(), cluster_num, device='cpu', distance='cosine')
-            cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers=centers_xprop)
+        if args.rounding:
+            print('rounding')
+            if e == 0:
+                cluster_ids,centers_xprop = k_means(X_prop.detach().cpu(), cluster_num, device='cpu', distance='cosine')
+                cluster_ids,centers = k_means((torch.round(torch.tanh(H)*7)).detach().cpu(), cluster_num, device='cpu', distance='cosine', centers=centers_xprop)
+            else:
+                cluster_ids,centers = k_means((torch.round(torch.tanh(H)*7)).detach().cpu(), cluster_num, device='cpu', distance='cosine', centers='kmeans')
         else:
-            cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers='kmeans')
+            if e == 0:
+                cluster_ids,centers_xprop = k_means(X_prop.detach().cpu(), cluster_num, device='cpu', distance='cosine')
+                cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers=centers_xprop)
+            else:
+                cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers='kmeans')
+
+
+
 
         C0 = cluster_id2assignment(cluster_ids, cluster_num).to(args.device)
         # C = Cprop(C0, A, args)
@@ -199,7 +214,7 @@ def train():
         C = F.normalize(C, p=2, dim=1)
 
 
-        loss_kmeans = args.loss_lambda_kmeans * kmeans_loss_fn(H, C, args)
+        loss_kmeans =  kmeans_loss_fn(H, C, args)
         
 
 
@@ -209,25 +224,25 @@ def train():
         elif args.norm == 0:
             H_t_norm = H_t
             H_a_norm = H_a
-        ort_loss = args.loss_lambda_SSG0 * (ortho_loss_fn(H_t_norm) + ortho_loss_fn(H_a_norm))
+        ort_loss = (ortho_loss_fn(H_t_norm) + ortho_loss_fn(H_a_norm))
         # inv_loss_o = args.loss_lambda_SSG1 * (H_t_norm - H_a_norm).pow(2).sum()
-        inv_loss_o = args.loss_lambda_SSG1 * F.mse_loss(H_t_norm, H_a_norm)
+        inv_loss_o = F.mse_loss(H_t_norm, H_a_norm)
         # inv_loss_o = args.loss_lambda_SSG1 * (H_t_norm - H_a_norm).norm(p=2, dim=1).mean()
-        inv_loss_n = args.loss_lambda_SSG2 * (node_t_neighbor_a_loss_fn2(H_t_norm, H_a_norm, A_ori=A) + node_t_neighbor_a_loss_fn2(H_a_norm, H_t_norm, A_ori=A))
+        inv_loss_n = (node_t_neighbor_a_loss_fn2(H_t_norm, H_a_norm, A_ori=A) + node_t_neighbor_a_loss_fn2(H_a_norm, H_t_norm, A_ori=A))
         # print(C.sum(0).mean(), C.sum(0).max())
-        inv_loss_c = args.loss_lambda_SSG3 * (node_t_cluster_a_loss_fn2(H_t_norm, H_a_norm, C, args.clu_size) + node_t_cluster_a_loss_fn2(H_a_norm, H_t_norm, C, args.clu_size))
-        inv_loss = inv_loss_o + inv_loss_n + inv_loss_c
+        inv_loss_c = (node_t_cluster_a_loss_fn2(H_t_norm, H_a_norm, C, clu_size=args.clu_size) + node_t_cluster_a_loss_fn2(H_a_norm, H_t_norm, C, clu_size=args.clu_size))
+        inv_loss = args.loss_lambda_SSG1 * inv_loss_o + args.loss_lambda_SSG2 * inv_loss_n + args.loss_lambda_SSG3 * inv_loss_c
 
 
-        loss = loss_prop + loss_kmeans + ort_loss + inv_loss
+        loss = args.loss_lambda_prop * loss_prop + args.loss_lambda_kmeans * loss_kmeans + args.loss_lambda_SSG0 * ort_loss + inv_loss
         loss.backward()
         optimizer_t.step()
         optimizer_a.step()
 
 
         ## evaluation
-        print('epoch: %d , loss: %.2f, loss_kmeans: %.2f, loss_prop: %.2f, ort_loss: %.2f, loss_inv: %.2f' % (e, loss.item(), loss_kmeans.item(), loss_prop, ort_loss, inv_loss), end=' ')
-        print('inv_loss1: %.2f, inv_loss2: %.2f, inv_loss3: %.2f' % (inv_loss_o, inv_loss_n, inv_loss_c), end=' ')
+        print('epoch: %d , loss: %.3f, loss_kmeans: %.3f, loss_prop: %.3f, ort_loss: %.3f,' % (e, loss.item(), loss_kmeans.item(), loss_prop, ort_loss), end=' ')
+        print('inv_loss1: %.3f, inv_loss2: %.3f, inv_loss3: %.3f,' % (inv_loss_o, inv_loss_n, inv_loss_c), end=' ')
         predict_labels = torch.argmax(C, dim=1)
         res = print_eval(predict_labels.cpu().numpy(), true_labels, A.cpu().numpy())
         
@@ -245,8 +260,9 @@ def train():
 
 retain_grah=True 
 total_res = []
+# for fold in range(5):
 # final result is the mean of 5 repeated experiments
-for fold in range(5):
+for fold in [int(x) for x in args.fold.split('-')]:
     setup_seed(43+fold)
     print("#"*60)
     print("#"*26, ' fold:%d ' % fold, "#"*26)
@@ -254,17 +270,20 @@ for fold in range(5):
 
 
     #### define model and optimizer #####
-    model = top_agg(A_norm, args.top_alpha, args.top_layers, args.hidden_dim, args.hidden_dim, linear_prop=args.top_prop, linear_trans=args.top_linear_trans).to(args.device)
-    attr_model = attr_agg(S_norm, args.attr_alpha, args.attr_layers, args.hidden_dim, args.hidden_dim, linear_prop=args.attr_prop, linear_trans=args.attr_linear_trans).to(args.device)
+    model = top_agg(A_norm, args.top_alpha, args.top_layers, args.input_dim, args.hidden_dim, linear_prop=args.top_prop, linear_trans=args.top_linear_trans).to(args.device)
+    attr_model = attr_agg(S_norm, args.attr_alpha, args.attr_layers, args.input_dim, args.hidden_dim, linear_prop=args.attr_prop, linear_trans=args.attr_linear_trans).to(args.device)
 
     fusion_attr = fusion(args.fusion_method, args.fusion_beta, args.hidden_dim).to(args.device)
     
     C_prop_model = C_agg(args.cprop_alpha, args.cprop_layers, A_norm).to(args.device)
 
 
-    lint = nn.Linear(X.shape[0], args.hidden_dim).to(args.device)
-    lina = nn.Linear(X.shape[0], args.hidden_dim).to(args.device)
+    # lint = nn.Linear(X.shape[0], args.input_dim).to(args.device)
+    # lina = nn.Linear(X.shape[0], args.input_dim).to(args.device)
 
+    lint = MLP(in_channels=X.shape[0], hidden_channels=512, out_channels=args.hidden_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True).to(args.device)
+    lina = MLP(in_channels=X.shape[0], hidden_channels=512, out_channels=args.hidden_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True).to(args.device)
+    
 
     optimizer_t = torch.optim.Adam(list(model.parameters())+list(lint.parameters()), lr=args.t_lr, weight_decay=args.t_wd)
     optimizer_a = torch.optim.Adam(list(attr_model.parameters())+list(lina.parameters()), lr=args.a_lr, weight_decay=args.a_wd)
@@ -280,8 +299,8 @@ for fold in range(5):
 
     ##### compute low rank US_norm and UA_norm #####
     if args.svd == 1:
-        US_norm, _, _ = torch.svd_lowrank(eval(args.svd_on_S), q=args.hidden_dim, niter=7)
-        UA_norm, _, _ = torch.svd_lowrank(eval(args.svd_on_A), q=args.hidden_dim, niter=7)
+        US_norm, _, _ = torch.svd_lowrank(eval(args.svd_on_S), q=args.input_dim, niter=7)
+        UA_norm, _, _ = torch.svd_lowrank(eval(args.svd_on_A), q=args.input_dim, niter=7)
         US_norm = model.agg(US_norm)
         UA_norm = attr_model.agg(UA_norm)
     elif args.svd == 0:
@@ -291,26 +310,26 @@ for fold in range(5):
         UA_norm = attr_model.agg(lina(UA_norm_))
 
 
-    # ##### test init clustering quality #####
-    # ##### on X #####
-    # print('clustering results on initial X:\t', end=' ')
-    # cluster_ids,_ = k_means(X, cluster_num, device='cpu', distance='cosine')
-    # print_eval(cluster_ids, true_labels, A.cpu().numpy())   
+    ##### test init clustering quality #####
+    ##### on X #####
+    print('clustering results on initial X:\t', end=' ')
+    cluster_ids,_ = k_means(X, cluster_num, device='cpu', distance='cosine')
+    print_eval(cluster_ids, true_labels, A.cpu().numpy())   
 
-    # ##### on X_prop #####
-    # print('clustering results on initial X_prop:\t', end=' ')
-    # cluster_ids,centers = k_means(X_prop.detach(), cluster_num, device='cpu', distance='cosine')
-    # print_eval(cluster_ids, true_labels, A.cpu().numpy())  
+    ##### on X_prop #####
+    print('clustering results on initial X_prop:\t', end=' ')
+    cluster_ids,centers = k_means(X_prop.detach(), cluster_num, device='cpu', distance='cosine')
+    print_eval(cluster_ids, true_labels, A.cpu().numpy())  
 
-    # ##### on H_t #####
-    # print('clustering results on initial H_t:\t', end=' ')
-    # cluster_ids,centers = k_means((model.top_filter @ US_norm).detach(), cluster_num, device='cpu', distance='cosine')
-    # print_eval(cluster_ids, true_labels, A.cpu().numpy()) 
+    ##### on H_t #####
+    print('clustering results on initial H_t:\t', end=' ')
+    cluster_ids,centers = k_means((model.top_filter @ US_norm).detach(), cluster_num, device='cpu', distance='cosine')
+    print_eval(cluster_ids, true_labels, A.cpu().numpy()) 
 
-    # ##### on H_a #####
-    # print('clustering results on initial H_a:\t', end=' ')
-    # cluster_ids,centers = k_means((attr_model.attr_filter @ UA_norm).detach(), cluster_num, device='cpu', distance='cosine')
-    # print_eval(cluster_ids, true_labels, A.cpu().numpy())  
+    ##### on H_a #####
+    print('clustering results on initial H_a:\t', end=' ')
+    cluster_ids,centers = k_means((attr_model.attr_filter @ UA_norm).detach(), cluster_num, device='cpu', distance='cosine')
+    print_eval(cluster_ids, true_labels, A.cpu().numpy())  
 
 
     ##### training and evaluation #####
