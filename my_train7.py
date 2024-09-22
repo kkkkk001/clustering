@@ -42,8 +42,6 @@ def spectral_clu(H, cluster_num):
 parser = argparse.ArgumentParser(description='my_model')
 ### training params ###
 parser.add_argument('--dataset', type=str, default='cora', help="name of dataset")
-parser.add_argument('--input_dim', type=int, default=64, help="hidden dimension")
-parser.add_argument('--hidden_dim', type=int, default=64, help="hidden dimension")
 parser.add_argument('--epochs', type=int, default=300, help='Number of epochs to train.')
 parser.add_argument('--t_lr', type=float, default=1e-3, help='Initial learning rate.')
 parser.add_argument('--a_lr', type=float, default=1e-3, help='Initial learning rate.')
@@ -51,20 +49,23 @@ parser.add_argument('--t_wd', type=float, default=5e-4, help='')
 parser.add_argument('--a_wd', type=float, default=5e-4, help='')
 parser.add_argument('--device', type=str, default='cuda', help='device')
 parser.add_argument('--dropout', type=float, default=0.0, help='')
-parser.add_argument('--norm', type=int, default=0, help='')
-parser.add_argument('--svd', type=int, default=1, help='if 1, svd on S_norm and A_norm, if 0, lin on S and A')
+parser.add_argument('--fold', type=str, default='0-1-2-3-4', help='num of repeats, and seed of each repeat, separated by -')
+
+
+parser.add_argument('--hidden_dim', type=int, default=512, help="hidden dimension")
+parser.add_argument('--emb_dim', type=int, default=64, help="hidden dimension")
+
+
+parser.add_argument('--input_encoder', type=str, default='svd', help='svd, lin, or mlp')
 parser.add_argument('--svd_on_S', type=str, default='S_norm', help='obtain input features by svd on S or S_norm')
 parser.add_argument('--svd_on_A', type=str, default='A_norm', help='obtain input features by svd on S or A_norm')
-parser.add_argument('--post_process', type=str, default='l2-norm', help='if l2-norm, l2 normalization npn Ht and HA before fusion, if none, no post process')
-
 
 
 ### top_agg params ###
 parser.add_argument('--top_layers', type=int, default=5, help='')
 parser.add_argument('--top_alpha', type=float, default=0.5, help='')
 parser.add_argument('--top_prop', type=str, default='sgc', help='sgc style, gcn style, appnp style, or deprop style')
-# parser.add_argument('--top_linear_trans', type=int, default=1, help='1 for linear transformation, 0 for mlp transformation')
-parser.add_argument('--top_linear_trans', type=str, default='lin', help='1 for linear transformation, 0 for mlp transformation')
+parser.add_argument('--top_linear_trans', type=str, default='lin', help='lin or mlp')
 
 
 
@@ -73,8 +74,12 @@ parser.add_argument('--attr_layers', type=int, default=5, help='')
 parser.add_argument('--attr_alpha', type=float, default=0.5, help='')
 parser.add_argument('--attr_r', type=float, default=0.5, help='the nnz ratio of attr simi mtx')
 parser.add_argument('--attr_prop', type=str, default='sgc', help='sgc style, gcn style, or appnp style')
-# parser.add_argument('--attr_linear_trans', type=int, default=1, help='1 for linear transformation, 0 for mlp transformation')
-parser.add_argument('--attr_linear_trans', type=str, default='lin', help='1 for linear transformation, 0 for mlp transformation')
+parser.add_argument('--attr_linear_trans', type=str, default='lin', help='lin or mlp')
+
+
+
+### fusion params ###
+parser.add_argument('--fusion_norm', type=str, default='none', help='if l2-norm, l2 normalization on Ht and HA before fusion, if none, no post process')
 parser.add_argument('--fusion_method', type=str, default='add', help='add, concat, max')
 parser.add_argument('--fusion_beta', type=float, default=0.5, help='H = beta * H_t + (1-beta) * H_a')
 
@@ -89,23 +94,10 @@ parser.add_argument('--cprop_alpha', type=float, default=0.2, help='')
 parser.add_argument('--cprop_abl', type=int, default=0, help='')
 
 
-### DeProp params ###
-parser.add_argument('--gnnlayers', type=int, default=5, help="Number of gnn layers")
-parser.add_argument('--step_size_gamma', type=float, default=0.005, help='')
-parser.add_argument('--lambda1', type=float, default=100, help="")
-parser.add_argument('--lambda2', type=float, default=0.03, help="")
-parser.add_argument('--with_bn', type=strtobool, default=False, help="")
-parser.add_argument('--F_norm', type=strtobool, default=True, help="")
-parser.add_argument('--lin', type=strtobool, default=True, help="")
-
-
 ### loss params ###
 parser.add_argument('--loss_lambda_prop', type=float, default=1, help='')
 parser.add_argument('--sharpening', type=float, default=1, help="")
-parser.add_argument('--loss_lambda_adj', type=float, default=1.0, help='')
-parser.add_argument('--loss_lambda_attr', type=float, default=1.0, help='')
 parser.add_argument('--loss_lambda_kmeans', type=float, default=0.1, help='')
-# parser.add_argument('--reg_loss', type=str, default='orth', help='orth(ogonal), col(lapse), sqrt')
 parser.add_argument('--kmeans_loss', type=str, default='tr', 
                     help='tr(ace), cen(troid contrastive), nod(e contrastive)')
 parser.add_argument('--loss_lambda_SSG0', type=float, default=0.001, help='')
@@ -114,14 +106,14 @@ parser.add_argument('--loss_lambda_SSG2', type=float, default=0.01, help='')
 parser.add_argument('--loss_lambda_SSG3', type=float, default=0.01, help='')
 parser.add_argument('--temperature', type=float, default=1, help='') 
 parser.add_argument('--clu_size', type=strtobool, default=True, help='') 
-parser.add_argument('--rounding', type=strtobool, default=False, help='') 
+parser.add_argument('--norm', type=int, default=0, help='')
 
 
 ### log params ###
 parser.add_argument('--log_file', type=str, default=None, help='')
 parser.add_argument('--log_fold_file', type=str, default=None, help='')
 parser.add_argument('--log_title', type=strtobool, default=True, help='')
-parser.add_argument('--fold', type=str, default='0-1-2-3-4', help='num of repeats, and seed of each repeat, separated by -')
+parser.add_argument('--save_model', type=strtobool, default=True, help='')
 
 
 args = parser.parse_args()
@@ -159,30 +151,22 @@ def train():
     best_acc = 0
     best_res = []
 
+    best_loss = 99999999
+
     beta = args.fusion_beta
     for e in range(args.epochs):
         optimizer_t.zero_grad()
         optimizer_a.zero_grad()
 
-        pdb.set_trace()
-
-        if args.svd == 1:
-            global US_norm, UA_norm
-        if args.svd == 0:
-            US_norm = model.agg(lint(US_norm_))
-            UA_norm = attr_model.agg(lina(UA_norm_))
-
-
+        US_norm = model.agg(S_encoder())
         H_t = model(US_norm)
+
+        UA_norm = attr_model.agg(A_encoder())
         H_a = attr_model(UA_norm)
 
+        H = fusion_attr(H_t, H_a)
 
-        if args.post_process == 'l2-norm':
-            print('l2-norm')
-            H_t = F.normalize(H_t, p=2, dim=1)
-            H_a = F.normalize(H_a, p=2, dim=1)
 
-        H = fusion_attr(H_t, H_a) 
         # check if H contains nan
         if torch.isnan(H).sum() > 0:
             print('nan in H')
@@ -191,21 +175,12 @@ def train():
 
         loss_prop = torch.pow(1 - cos_sim(H, X_prop), args.sharpening).mean()
 
-        if args.rounding:
-            print('rounding')
-            if e == 0:
-                cluster_ids,centers_xprop = k_means(X_prop.detach().cpu(), cluster_num, device='cpu', distance='cosine')
-                cluster_ids,centers = k_means((torch.round(torch.tanh(H)*7)).detach().cpu(), cluster_num, device='cpu', distance='cosine', centers=centers_xprop)
-            else:
-                cluster_ids,centers = k_means((torch.round(torch.tanh(H)*7)).detach().cpu(), cluster_num, device='cpu', distance='cosine', centers='kmeans')
+
+        if e == 0:
+            cluster_ids,centers_xprop = k_means(X_prop.detach().cpu(), cluster_num, device='cpu', distance='cosine')
+            cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers=centers_xprop)
         else:
-            if e == 0:
-                cluster_ids,centers_xprop = k_means(X_prop.detach().cpu(), cluster_num, device='cpu', distance='cosine')
-                cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers=centers_xprop)
-            else:
-                cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers='kmeans')
-
-
+            cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers='kmeans')
 
 
         C0 = cluster_id2assignment(cluster_ids, cluster_num).to(args.device)
@@ -218,18 +193,17 @@ def train():
         # C = C0
         C = F.normalize(C, p=2, dim=1)
 
-
         loss_kmeans =  kmeans_loss_fn(H, C, args)
         
 
 
         if args.norm == 1:
+            print('norm')
             H_t_norm = (H_t - H_t.mean(dim=0)) / H_t.std(dim=0) / torch.sqrt(torch.tensor(H_t.shape[1]).to(H_t.device))
             H_a_norm = (H_a - H_a.mean(dim=0)) / H_a.std(dim=0) / torch.sqrt(torch.tensor(H_a.shape[1]).to(H_a.device))
         elif args.norm == 0:
             H_t_norm = H_t
             H_a_norm = H_a
-        pdb.set_trace()
         ort_loss = (ortho_loss_fn(H_t_norm) + ortho_loss_fn(H_a_norm))
         # inv_loss_o = args.loss_lambda_SSG1 * (H_t_norm - H_a_norm).pow(2).sum()
         inv_loss_o = F.mse_loss(H_t_norm, H_a_norm)
@@ -258,6 +232,13 @@ def train():
             best_acc = res[0]
             best_res = res
             best_e = e
+            if args.save_model:
+                torch.save(H.cpu().detach(), best_model_path+'H.pth')
+        if loss < best_loss:
+            best_loss = loss
+            if args.save_model:
+                torch.save(H.cpu().detach(), best_model_path+'best_loss_H.pth')
+
     print(f'best epoch: {best_e}')
     return best_res
 
@@ -275,48 +256,36 @@ for fold in [int(x) for x in args.fold.split('-')]:
     print("#"*60)
 
 
+    ##### compute low rank US_norm and UA_norm #####
+    S_encoder = input_enc(args.input_encoder, X.shape[0], args.hidden_dim, args.emb_dim).to(args.device)
+    A_encoder = input_enc(args.input_encoder, X.shape[0], args.hidden_dim, args.emb_dim).to(args.device)
+    # store init US_norm / UA_norm within the model 
+    # for svd, use the first mtx; for lin or mlp, use the second mtx
+    S_encoder.init_U(eval(args.svd_on_S), X@X.t()) 
+    A_encoder.init_U(eval(args.svd_on_A), A)
+
+
     #### define model and optimizer #####
-    model = top_agg(A_norm, args.top_alpha, args.top_layers, args.input_dim, args.hidden_dim, linear_prop=args.top_prop, linear_trans=args.top_linear_trans).to(args.device)
-    attr_model = attr_agg(S_norm, args.attr_alpha, args.attr_layers, args.input_dim, args.hidden_dim, linear_prop=args.attr_prop, linear_trans=args.attr_linear_trans).to(args.device)
+    model = top_agg(A_norm, args.top_alpha, args.top_layers, args.emb_dim, args.hidden_dim, linear_prop=args.top_prop, linear_trans=args.top_linear_trans, norm=args.fusion_norm).to(args.device)
+    attr_model = attr_agg(S_norm, args.attr_alpha, args.attr_layers, args.emb_dim, args.hidden_dim, linear_prop=args.attr_prop, linear_trans=args.attr_linear_trans, norm=args.fusion_norm).to(args.device)
 
     fusion_attr = fusion(args.fusion_method, args.fusion_beta, args.hidden_dim).to(args.device)
     
     C_prop_model = C_agg(args.cprop_alpha, args.cprop_layers, A_norm).to(args.device)
 
 
-    # lint = nn.Linear(X.shape[0], args.input_dim).to(args.device)
-    # lina = nn.Linear(X.shape[0], args.input_dim).to(args.device)
-
-    lint = MLP(in_channels=X.shape[0], hidden_channels=512, out_channels=args.hidden_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True).to(args.device)
-    lina = MLP(in_channels=X.shape[0], hidden_channels=512, out_channels=args.hidden_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True).to(args.device)
-    
-
-    optimizer_t = torch.optim.Adam(list(model.parameters())+list(lint.parameters()), lr=args.t_lr, weight_decay=args.t_wd)
-    optimizer_a = torch.optim.Adam(list(attr_model.parameters())+list(lina.parameters()), lr=args.a_lr, weight_decay=args.a_wd)
+    optimizer_t = torch.optim.Adam(list(model.parameters())+list(S_encoder.parameters()), lr=args.t_lr, weight_decay=args.t_wd)
+    optimizer_a = torch.optim.Adam(list(attr_model.parameters())+list(A_encoder.parameters()), lr=args.a_lr, weight_decay=args.a_wd)
 
 
     ##### compute low rank X_prop #####
     X_prop = X_norm
     for _ in range(args.xprop_layers):
         X_prop = args.xprop_alpha * torch.spmm(A_norm, X_prop) + X_norm
-    U, s, _ = torch.svd_lowrank(X_prop, q=args.hidden_dim, niter=7)
+    U, s, _ = torch.svd_lowrank(X_prop, q=args.emb_dim, niter=7)
     X_prop = U @ torch.diag(s)
     X_prop = F.normalize(X_prop, p=2, dim=1)
-    pdb.set_trace()
 
-    ##### compute low rank US_norm and UA_norm #####
-    if args.svd == 1:
-        US_norm, _, _ = torch.svd_lowrank(eval(args.svd_on_S), q=args.input_dim, niter=7)
-        UA_norm, _, _ = torch.svd_lowrank(eval(args.svd_on_A), q=args.input_dim, niter=7)
-        US_norm = model.agg(US_norm)
-        UA_norm = attr_model.agg(UA_norm)
-    elif args.svd == 0:
-        US_norm_ = X@X.t()
-        UA_norm_ = A 
-        US_norm = model.agg(lint(US_norm_))
-        UA_norm = attr_model.agg(lina(UA_norm_))
-
-    # pdb.set_trace()
 
 
     ##### test init clustering quality #####
@@ -332,16 +301,20 @@ for fold in [int(x) for x in args.fold.split('-')]:
 
     ##### on H_t #####
     print('clustering results on initial H_t:\t', end=' ')
-    cluster_ids,centers = k_means((model.top_filter @ US_norm).detach(), cluster_num, device='cpu', distance='cosine')
+    cluster_ids,centers = k_means((model.top_filter @ S_encoder()).detach(), cluster_num, device='cpu', distance='cosine')
     print_eval(cluster_ids, true_labels, A.cpu().numpy()) 
 
     ##### on H_a #####
     print('clustering results on initial H_a:\t', end=' ')
-    cluster_ids,centers = k_means((attr_model.attr_filter @ UA_norm).detach(), cluster_num, device='cpu', distance='cosine')
+    cluster_ids,centers = k_means((attr_model.attr_filter @ A_encoder()).detach(), cluster_num, device='cpu', distance='cosine')
     print_eval(cluster_ids, true_labels, A.cpu().numpy())  
 
 
     ##### training and evaluation #####
+    best_model_path = f'/home/kxie/cluster/best_model/{args.dataset}/'
+    if not os.path.exists(best_model_path):
+        os.makedirs(best_model_path)
+    best_model_path += f'fold{fold}_'
     res = train()
     total_res.append(res)
 
@@ -370,10 +343,12 @@ print('total time:', total_time)
 with open(args.log_file, 'a+') as f:
     # if the file is empty, write the header
     if args.log_title:
-        f.write('norm, layers, attr_layers, alpha, S_alpha, ssg0, ssg1, ssg2, ssg3, fusion_beta, cprop_abl, svd, post_process, ')
+        f.write('input_encoder, top_linear_trans, fusion_norm, contras_norm, clu_size,')
+        f.write('layers, attr_layers, alpha, S_alpha, ssg0, ssg1, ssg2, ssg3, fusion_beta')
         f.write('dataset, acc_mean, acc_std, nmi_mean, nmi_std, ari_mean, ari_std, f1_mean, f1_std, mod_mean, mod_std, con_mean, con_std, time, ')
         f.write(', '.join(x for x in args_keys)+'\n')
-    f.write(', '.join([str(x) for x in [args.norm, args.top_layers, args.attr_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3, args.fusion_beta, args.cprop_abl, args.svd]])+', '+args.post_process+', ')
+    f.write(', '.join([str(x) for x in [args.input_encoder, args.top_linear_trans, args.fusion_norm, args.norm, args.clu_size]])+', ')
+    f.write(', '.join([str(x) for x in [args.top_layers, args.attr_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3, args.fusion_beta]])+', ')
     f.write('%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, '%(args.dataset, 
         total_res[:, 0].mean()*100, total_res[:, 0].std()*100, 
         total_res[:, 1].mean()*100, total_res[:, 1].std()*100, 
@@ -388,11 +363,13 @@ with open(args.log_file, 'a+') as f:
 with open(args.log_fold_file, 'a+') as f:
     # if the file is empty, write the header
     if args.log_title:
-        f.write('norm, layers, attr_layers, alpha, S_alpha, ssg0, ssg1, ssg2, ssg3, fusion_beta, cprop_abl, svd, post_process, ')
+        f.write('input_encoder, top_linear_trans, fusion_norm, contras_norm, clu_size,')
+        f.write('layers, attr_layers, alpha, S_alpha, ssg0, ssg1, ssg2, ssg3, fusion_beta')
         f.write('dataset, fold, acc_mean, nmi_mean, ari_mean, f1_mean, mod_mean, con_mean, time, ')
         f.write(', '.join(x for x in args_keys)+'\n')
     for i in range(total_res.shape[0]):
-        f.write(', '.join([str(x) for x in [args.norm, args.top_layers, args.attr_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3, args.fusion_beta, args.cprop_abl, args.svd]])+', '+args.post_process+', ')
+        f.write(', '.join([str(x) for x in [args.top_layers, args.attr_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3, args.fusion_beta]])+', ')
+        f.write(', '.join([str(x) for x in [args.input_encoder, args.top_linear_trans, args.fusion_norm, args.norm, args.clu_size]])+', ')
         f.write('%s, %d, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, '%(args.dataset, i, 
             total_res[i, 0]*100, total_res[i, 1]*100, total_res[i, 2]*100, total_res[i, 3]*100, total_res[i, 4]*100, total_res[i, 5]*100, total_time))
         f.write(', '.join(x for x in args_values)+'\n')

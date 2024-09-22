@@ -1,8 +1,10 @@
+#%%
+# matplotlib ipympl
+
 # -*- coding: utf-8 -*-
 # @Author  : Yue Liu
 # @Email   : yueliu19990731@163.com
 # @Time    : 2021/11/25 11:11
-
 import pdb
 import numpy as np
 import seaborn as sns
@@ -10,7 +12,7 @@ import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 
 
-def t_sne(embeds, labels, sample_num=2000, show_fig=True):
+def t_sne(embeds, labels, sample_num=2000, show_fig=True, norm=True):
     """
     visualize embedding by t-SNE algorithm
     :param embeds: embedding of the data
@@ -20,6 +22,7 @@ def t_sne(embeds, labels, sample_num=2000, show_fig=True):
     :return fig: figure
     """
 
+    sample_num = min(sample_num, embeds.shape[0])
     # sampling
     sample_index = np.random.randint(0, embeds.shape[0], sample_num)
     sample_embeds = embeds[sample_index]
@@ -36,21 +39,27 @@ def t_sne(embeds, labels, sample_num=2000, show_fig=True):
             np.delete(ts_embeds, i)
 
     # normalization
-    x_min, x_max = np.min(ts_embeds, 0), np.max(ts_embeds, 0)
-    norm_ts_embeds = (ts_embeds - x_min) / (x_max - x_min)
+    if norm:
+        x_min, x_max = np.min(ts_embeds, 0), np.max(ts_embeds, 0)
+        norm_ts_embeds = (ts_embeds - x_min) / (x_max - x_min)
+    else:
+        norm_ts_embeds = ts_embeds
 
     # plot
     fig = plt.figure()
     for i in range(norm_ts_embeds.shape[0]):
-        plt.text(norm_ts_embeds[i, 0], norm_ts_embeds[i, 1], str(sample_labels[i]),
-                 color=plt.cm.Set1(sample_labels[i] % 7),
-                 fontdict={'weight': 'bold', 'size': 7})
+        plt.scatter(norm_ts_embeds[i, 0], norm_ts_embeds[i, 1],
+                    color=plt.cm.Set1(sample_labels[i] % 7),
+                    s=10)  # s 参数设置点的大小
+        # plt.text(norm_ts_embeds[i, 0], norm_ts_embeds[i, 1], str(sample_labels[i]),
+        #          color=plt.cm.Set1(sample_labels[i] % 7),
+        #          fontdict={'weight': 'bold', 'size': 7})
     plt.xticks([])
     plt.yticks([])
-    plt.title('t-SNE', fontsize=14)
+    # plt.title('t-SNE', fontsize=14)
     plt.axis('off')
     if show_fig:
-        plt.show()
+        plt.show(block=True)
     return fig
 
 
@@ -63,6 +72,8 @@ def similarity_plot(embedding, label, sample_num=1000, show_fig=True):
     :param show_fig: if show the figure
     :return fig: the figure
     """
+
+    sample_num = min(sample_num, embedding.shape[0])
     # sampling
     label_sample = label[:sample_num]
     embedding_sample = embedding[:sample_num, :]

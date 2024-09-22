@@ -226,7 +226,7 @@ class encoding2(nn.Module):
 
 
 class top_agg(nn.Module):
-    def __init__(self, A_norm, alpha, hop, input_dim, hidden_dim, linear_prop='sgc', linear_trans=1):
+    def __init__(self, A_norm, alpha, hop, emb_dim, hidden_dim, linear_prop='sgc', linear_trans='lin', norm=None):
         super(top_agg, self).__init__()
 
         if linear_prop=='sgc':
@@ -235,19 +235,21 @@ class top_agg(nn.Module):
             for _ in range(hop):
                 top_filter = alpha * A_norm @ top_filter + I
             self.top_filter = top_filter
-            if linear_trans==1:
-                self.fc = nn.Linear(input_dim, hidden_dim)
-            elif linear_trans==0:
-                self.fc = MLP(in_channels=input_dim, hidden_channels=512, out_channels=hidden_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True)
+            if linear_trans=='lin':
+                self.fc = nn.Linear(emb_dim, emb_dim)
+            elif linear_trans=='mlp':
+                self.fc = MLP(in_channels=emb_dim, hidden_channels=hidden_dim, out_channels=emb_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True)
         elif linear_prop=='gcn':
             self.top_filter = A_norm
             self.lins = ModuleList()
-            self.lins.append(Linear(in_channels = input_dim, out_channels = hidden_dim, bias = True, weight_initializer = 'glorot'))
-            for i in range(hop-1):
+            self.lins.append(Linear(in_channels = emb_dim, out_channels = hidden_dim, bias = True, weight_initializer = 'glorot'))
+            for i in range(hop-2):
                 self.lins.append(Linear(in_channels = hidden_dim, out_channels = hidden_dim, bias = True, weight_initializer = 'glorot'))
+            self.lins.append(Linear(in_channels = hidden_dim, out_channels = emb_dim, bias = True, weight_initializer = 'glorot'))
         else:
             raise NotImplementedError
         self.linear_prop = linear_prop
+        self.norm = norm
         
 
     def agg(self, x):
@@ -257,7 +259,9 @@ class top_agg(nn.Module):
         if self.linear_prop == 'sgc':
             x = self.fc(x)
             # x = (x - x.mean(0)) / x.std(0) / torch.sqrt(torch.tensor(x.shape[1]).to(x.device))
-            # x = F.normalize(x, p=2, dim=1)
+            if self.norm == 'l2-norm':
+                print('l2-norm')
+                x = F.normalize(x, p=2, dim=1)
         elif self.linear_prop == 'gcn':
             for lin in self.lins[:-1]:
                 x = lin(self.top_filter @ x)
@@ -274,15 +278,15 @@ class top_agg(nn.Module):
 
 
 class top_agg2(nn.Module):
-    def __init__(self, A_norm, alpha, hop, input_dim, hidden_dim, linear_trans=1):
+    def __init__(self, A_norm, alpha, hop, emb_dim, hidden_dim, linear_trans='lin'):
         super(top_agg2, self).__init__()
 
         self._top_filter(A_norm, alpha, hop)
 
-        if linear_trans==1:
-            self.fc = nn.Linear(input_dim, hidden_dim)
-        elif linear_trans==0:
-            self.fc = MLP(in_channels=input_dim, hidden_channels=hidden_dim, out_channels=hidden_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True)
+        if linear_trans=='lin':
+            self.fc = nn.Linear(emb_dim, emb_dim)
+        elif linear_trans=='mlp':
+            self.fc = MLP(in_channels=emb_dim, hidden_channels=hidden_dim, out_channels=emb_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True)
     
     
     def _top_filter(self, A_norm, alpha, hop):
@@ -331,7 +335,7 @@ def compute_attr_simi_mtx(X, attr_r):
 
 
 class attr_agg(nn.Module):
-    def __init__(self, attr_simi_mtx, alpha, hop, input_dim, hidden_dim, linear_prop='sgc', linear_trans=1):
+    def __init__(self, attr_simi_mtx, alpha, hop, emb_dim, hidden_dim, linear_prop='sgc', linear_trans='lin', norm=None):
         super(attr_agg, self).__init__()
 
         self.attr_simi_mtx = attr_simi_mtx
@@ -343,19 +347,21 @@ class attr_agg(nn.Module):
             for _ in range(hop):
                 attr_filter = alpha * attr_simi_mtx @ attr_filter + I
             self.attr_filter = attr_filter
-            if linear_trans==1:
-                self.fc = nn.Linear(input_dim, hidden_dim)
-            elif linear_trans==0:
-                self.fc = MLP(in_channels=input_dim, hidden_channels=512, out_channels=hidden_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True)
+            if linear_trans=='lin':
+                self.fc = nn.Linear(emb_dim, emb_dim)
+            elif linear_trans=='mlp':
+                self.fc = MLP(in_channels=emb_dim, hidden_channels=hidden_dim, out_channels=emb_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True)
         elif linear_prop=='gcn':
             self.attr_filter = attr_simi_mtx
             self.lins = ModuleList()
-            self.lins.append(Linear(in_channels = input_dim, out_channels = hidden_dim, bias = True, weight_initializer = 'glorot'))
-            for i in range(hop-1):
+            self.lins.append(Linear(in_channels = emb_dim, out_channels = hidden_dim, bias = True, weight_initializer = 'glorot'))
+            for i in range(hop-2):
                 self.lins.append(Linear(in_channels = hidden_dim, out_channels = hidden_dim, bias = True, weight_initializer = 'glorot'))
+            self.lins.append(Linear(in_channels = hidden_dim, out_channels = emb_dim, bias = True, weight_initializer = 'glorot'))
         else:
             raise NotImplementedError
         self.linear_prop = linear_prop
+        self.norm = norm
 
     def agg(self, x):
         return self.attr_filter @ x
@@ -365,7 +371,9 @@ class attr_agg(nn.Module):
         if self.linear_prop == 'sgc':
             x = self.fc(x)
             # x = (x - x.mean(0)) / x.std(0) / torch.sqrt(torch.tensor(x.shape[1]).to(x.device))
-            # x = F.normalize(x, p=2, dim=1)
+            if self.norm == 'l2-norm':
+                print('l2-norm')
+                x = F.normalize(x, p=2, dim=1)
         elif self.linear_prop == 'gcn':
             for lin in self.lins[:-1]:
                 x = lin(self.attr_filter @ x)
@@ -376,18 +384,20 @@ class attr_agg(nn.Module):
 
 
 class fusion(nn.Module):
-    def __init__(self, fusion_method, fusion_beta, hidden_dim):
+    def __init__(self, fusion_method, fusion_beta, emb_dim, fusion_norm=None):
         super(fusion, self).__init__()
         self.fusion_method = fusion_method
         self.fusion_beta = fusion_beta
+        self.fusion_norm = fusion_norm
         if fusion_method == 'concat':
-            self.fusion_fc = nn.Linear(2*hidden_dim, hidden_dim)
+            self.fusion_fc = nn.Linear(2*emb_dim, emb_dim)
         else: 
-            self.fusion_fc = nn.Linear(hidden_dim, hidden_dim)
+            self.fusion_fc = nn.Linear(emb_dim, emb_dim)
 
-    def forward(self, H_low, H_high, beta=None):
+    def forward(self, H_low, H_high, beta=None): # an in-place normalization
         if beta is None:
             beta = self.fusion_beta
+
         H_low = beta * H_low
         H_high = (1-beta) * H_high
 
@@ -729,26 +739,38 @@ def DePropagate(C, C0, A, gamma, alphaC, alphaO):
 
 
 
-class preprocess_SA(nn.Module):
+class input_enc(nn.Module):
     """preprocess S or A, used as input to following model and attr_model
     args:
         model (str): svd on S or A, lin(ear) on S or A, or mlp on S or A
         dims (list): [hidden_dim] for svd, [input_dim, hidden_dim] for lin, [input_dim, hidden_dim1, hidden_dim2, ..., hidden_dimn] for mlp
     """
-    def __init__(self, model, dims):
-        super(preprocess_SA, self).__init__()
-        self.model = model
-        self.dims = dims
+    def __init__(self, enc, input_dim, hidden_dim, emb_dim):
+        super(input_enc, self).__init__()
+        self.model = enc
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.emb_dim = emb_dim
         if self.model == 'lin':
-            self.fc = nn.Linear(dims[0], dims[1])
+            self.fc = nn.Linear(input_dim, emb_dim)
         elif self.model == 'mlp':
-            self.fc = MLP(dims, batch_norm=False, dropout=0.0, bias=True)
-    def forward(self, x):
+            self.fc = MLP([input_dim, hidden_dim, emb_dim], batch_norm=False, dropout=0.0, bias=True)
+    
+
+    def init_U(self, mtx1, mtx2):
         if self.model == 'svd':
-            U, s, _ = torch.svd_lowrank(x, q=self.dims[0], niter=7)
-            return U 
+            U, _, _ = torch.svd_lowrank(mtx1, q=self.emb_dim, niter=7)
+            self.U = U
+        elif self.model == 'lin' or self.model == 'mlp':
+            self.U = mtx2
+        
+
+    def forward(self):
+        if self.model == 'svd':
+            return self.U
         else:
-            return self.fc(x)
+            return self.fc(self.U)
+
 
 
 class pre_process_x(nn.Module):
