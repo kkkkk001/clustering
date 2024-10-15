@@ -13,8 +13,8 @@ from datetime import datetime
 import time
 from distutils.util import strtobool
 import sys
-sys.path.insert(0, './DeProp')
-from DeProp.model import DeProp
+# sys.path.insert(0, './DeProp')
+# from DeProp.model import DeProp
 setup_seed(42)
 torch.autograd.set_detect_anomaly(True)
 start_time = time.time()
