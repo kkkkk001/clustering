@@ -50,7 +50,7 @@ def t_sne(embeds, labels, sample_num=2000, show_fig=True, norm=True):
     for i in range(norm_ts_embeds.shape[0]):
         plt.scatter(norm_ts_embeds[i, 0], norm_ts_embeds[i, 1],
                     color=plt.cm.Set1(sample_labels[i] % 7),
-                    s=10)  # s 参数设置点的大小
+                    s=10)  
         # plt.text(norm_ts_embeds[i, 0], norm_ts_embeds[i, 1], str(sample_labels[i]),
         #          color=plt.cm.Set1(sample_labels[i] % 7),
         #          fontdict={'weight': 'bold', 'size': 7})

@@ -13,7 +13,7 @@ from datetime import datetime
 import time
 from distutils.util import strtobool
 import sys
-sys.path.insert(0, '/home/kxie/cluster/DeProp')
+sys.path.insert(0, './DeProp')
 from DeProp.model import DeProp
 setup_seed(42)
 torch.autograd.set_detect_anomaly(True)
@@ -132,7 +132,7 @@ for key, value in vars(args).items():
     args_values.append(str(value))
 
 ##### load data #####
-X, true_labels, A = load_graph_data(root_path='/home/kxie/cluster/dataset/', 
+X, true_labels, A = load_graph_data(root_path='./dataset/', 
                           dataset_name=args.dataset, show_details=True)
 cluster_num = len(np.unique(true_labels))
 
@@ -317,7 +317,7 @@ for fold in [int(x) for x in args.fold.split('-')]:
 
 
     ##### training and evaluation #####
-    best_model_path = f'/home/kxie/cluster/best_model/{args.dataset}/'
+    best_model_path = f'./best_model/{args.dataset}/'
     if not os.path.exists(best_model_path):
         os.makedirs(best_model_path)
     best_model_path += f'fold{fold}_'

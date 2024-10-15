@@ -497,8 +497,6 @@ class cluster_model(nn.Module):
     
 
     def forward(self, H):
-        # 对clustering assignment matrix进行列归一化会导致每一项都很小
-        # 改成了行归一化
         if self.method == 'mlp':
             return F.softmax(self.fc(H), dim=1)
         else:
