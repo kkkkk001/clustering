@@ -310,7 +310,7 @@ class top_agg2(nn.Module):
 
 
 
-def compute_attr_simi_mtx(X, attr_r):
+def compute_attr_simi_mtx(X, attr_r, bin=0):
     ### contruct the attribute similarity matrix ###
     X_n = F.normalize(X, p=2, dim=1)
     attr_simi_mtx = (X_n@X_n.t()).to(X.device)
@@ -325,13 +325,34 @@ def compute_attr_simi_mtx(X, attr_r):
     sort_indices = sort_indices[:keep_size]
 
     values = values[sort_indices]
-    # values = torch.ones_like(values)
+    if bin == 1:
+        values = torch.ones_like(values)
     row = row[sort_indices]
     col = col[sort_indices]
     attr_simi_mtx = torch.sparse_coo_tensor(torch.stack((row, col),0), values, attr_simi_mtx.shape)
     attr_simi_mtx = attr_simi_mtx.to_dense()
 
     return attr_simi_mtx
+
+
+def compute_gaussian_kernel_mtx(X, sigma=0.2):
+    X_n = F.normalize(X, p=2, dim=1)
+    attr_simi_mtx = (X_n@X_n.t()).to(X.device)
+    attr_simi_mtx = torch.exp(-attr_simi_mtx/(2 * sigma ** 2))
+    return attr_simi_mtx
+
+
+def compute_knn_simi_mtx(X, k=10):
+    X_n = F.normalize(X, p=2, dim=1)
+    attr_simi_mtx = (X_n@X_n.t()).to(X.device)
+    _, indices = torch.topk(attr_simi_mtx, k, dim=1)
+    row = torch.arange(attr_simi_mtx.shape[0]).repeat(k, 1).t().reshape(-1).to(X.device)
+    col = indices.reshape(-1).to(X.device)
+    values = torch.ones_like(row).float().to(X.device)
+    attr_simi_mtx = torch.sparse_coo_tensor(torch.stack((row, col),0), values, attr_simi_mtx.shape)
+    attr_simi_mtx = attr_simi_mtx.to_dense()
+    return attr_simi_mtx
+
 
 
 class attr_agg(nn.Module):
@@ -794,3 +815,18 @@ class pre_process_x(nn.Module):
             return U @ torch.diag(s)
         else:
             return self.fc(x)
+        
+class GCN(torch.nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels):
+        super().__init__()
+        self.conv1 = GCNConv(in_channels, hidden_channels,
+                             normalize=True)
+        self.conv2 = GCNConv(hidden_channels, out_channels,
+                             normalize=True)
+
+    def forward(self, x, edge_index, edge_weight=None):
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = self.conv1(x, edge_index, edge_weight).relu()
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = self.conv2(x, edge_index, edge_weight)
+        return x

@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 
 
-def t_sne(embeds, labels, sample_num=2000, show_fig=True, norm=True):
+def t_sne(embeds, labels, sample_index, show_fig=True, norm=True):
     """
     visualize embedding by t-SNE algorithm
     :param embeds: embedding of the data
@@ -22,9 +22,9 @@ def t_sne(embeds, labels, sample_num=2000, show_fig=True, norm=True):
     :return fig: figure
     """
 
-    sample_num = min(sample_num, embeds.shape[0])
-    # sampling
-    sample_index = np.random.randint(0, embeds.shape[0], sample_num)
+    # sample_num = min(sample_num, embeds.shape[0])
+    # # sampling
+    # sample_index = np.random.randint(0, embeds.shape[0], sample_num)
     sample_embeds = embeds[sample_index]
     sample_labels = labels[sample_index]
 

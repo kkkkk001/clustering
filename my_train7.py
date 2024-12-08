@@ -73,6 +73,7 @@ parser.add_argument('--top_linear_trans', type=str, default='lin', help='lin or 
 parser.add_argument('--attr_layers', type=int, default=5, help='')
 parser.add_argument('--attr_alpha', type=float, default=0.5, help='')
 parser.add_argument('--attr_r', type=float, default=0.5, help='the nnz ratio of attr simi mtx')
+parser.add_argument('--attr_bin', type=int, default=0, help='the nnz ratio of attr simi mtx')
 parser.add_argument('--attr_prop', type=str, default='sgc', help='sgc style, gcn style, or appnp style')
 parser.add_argument('--attr_linear_trans', type=str, default='lin', help='lin or mlp')
 
@@ -107,13 +108,14 @@ parser.add_argument('--loss_lambda_SSG3', type=float, default=0.01, help='')
 parser.add_argument('--temperature', type=float, default=1, help='') 
 parser.add_argument('--clu_size', type=strtobool, default=True, help='') 
 parser.add_argument('--norm', type=int, default=0, help='')
+parser.add_argument('--rounding', type=int, default=0, help='')
 
 
 ### log params ###
 parser.add_argument('--log_file', type=str, default=None, help='')
 parser.add_argument('--log_fold_file', type=str, default=None, help='')
 parser.add_argument('--log_title', type=strtobool, default=True, help='')
-parser.add_argument('--save_model', type=strtobool, default=True, help='')
+parser.add_argument('--save_model', type=strtobool, default=False, help='')
 
 
 args = parser.parse_args()
@@ -142,7 +144,7 @@ A_norm = normalize_adj_torch(A, self_loop=True, symmetry=True)
 X = torch.FloatTensor(X).to(args.device)
 X_norm = F.normalize(X, p=2, dim=1)
 
-S = compute_attr_simi_mtx(X, args.attr_r).to(args.device)
+S = compute_attr_simi_mtx(X, args.attr_r, args.attr_bin).to(args.device)
 S_norm = normalize_adj_torch(S, self_loop=False, symmetry=True).to(args.device)
 
 
@@ -176,11 +178,15 @@ def train():
         loss_prop = torch.pow(1 - cos_sim(H, X_prop), args.sharpening).mean()
 
 
-        if e == 0:
-            cluster_ids,centers_xprop = k_means(X_prop.detach().cpu(), cluster_num, device='cpu', distance='cosine')
-            cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers=centers_xprop)
+        if args.rounding == 0:
+            if e == 0:
+                cluster_ids,centers_xprop = k_means(X_prop.detach().cpu(), cluster_num, device='cpu', distance='cosine')
+                cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers=centers_xprop)
+            else:
+                cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers='kmeans')
         else:
-            cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers='kmeans')
+            print('rounding')
+            cluster_ids,centers = k_means((torch.round(torch.tanh(H)*7)).detach().cpu(), cluster_num, device='cpu', distance='cosine', centers='kmeans')
 
 
         C0 = cluster_id2assignment(cluster_ids, cluster_num).to(args.device)
@@ -289,25 +295,25 @@ for fold in [int(x) for x in args.fold.split('-')]:
 
 
     ##### test init clustering quality #####
-    ##### on X #####
-    print('clustering results on initial X:\t', end=' ')
-    cluster_ids,_ = k_means(X, cluster_num, device='cpu', distance='cosine')
-    print_eval(cluster_ids, true_labels, A.cpu().numpy())   
+    # ##### on X #####
+    # print('clustering results on initial X:\t', end=' ')
+    # cluster_ids,_ = k_means(X, cluster_num, device='cpu', distance='cosine')
+    # print_eval(cluster_ids, true_labels, A.cpu().numpy())   
 
-    ##### on X_prop #####
-    print('clustering results on initial X_prop:\t', end=' ')
-    cluster_ids,centers = k_means(X_prop.detach(), cluster_num, device='cpu', distance='cosine')
-    print_eval(cluster_ids, true_labels, A.cpu().numpy())  
+    # ##### on X_prop #####
+    # print('clustering results on initial X_prop:\t', end=' ')
+    # cluster_ids,centers = k_means(X_prop.detach(), cluster_num, device='cpu', distance='cosine')
+    # print_eval(cluster_ids, true_labels, A.cpu().numpy())  
 
-    ##### on H_t #####
-    print('clustering results on initial H_t:\t', end=' ')
-    cluster_ids,centers = k_means((model.top_filter @ S_encoder()).detach(), cluster_num, device='cpu', distance='cosine')
-    print_eval(cluster_ids, true_labels, A.cpu().numpy()) 
+    # ##### on H_t #####
+    # print('clustering results on initial H_t:\t', end=' ')
+    # cluster_ids,centers = k_means((model.top_filter @ S_encoder()).detach(), cluster_num, device='cpu', distance='cosine')
+    # print_eval(cluster_ids, true_labels, A.cpu().numpy()) 
 
-    ##### on H_a #####
-    print('clustering results on initial H_a:\t', end=' ')
-    cluster_ids,centers = k_means((attr_model.attr_filter @ A_encoder()).detach(), cluster_num, device='cpu', distance='cosine')
-    print_eval(cluster_ids, true_labels, A.cpu().numpy())  
+    # ##### on H_a #####
+    # print('clustering results on initial H_a:\t', end=' ')
+    # cluster_ids,centers = k_means((attr_model.attr_filter @ A_encoder()).detach(), cluster_num, device='cpu', distance='cosine')
+    # print_eval(cluster_ids, true_labels, A.cpu().numpy())  
 
 
     ##### training and evaluation #####
