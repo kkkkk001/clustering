@@ -273,6 +273,44 @@ class top_agg(nn.Module):
 
 
 
+class top_agg_f(nn.Module):
+    # the diffusion is computed during the forward pass 
+    # A_norm is given in sparse format
+    # gcn branch is removed for simplicity
+    def __init__(self, A_norm, alpha, hop, emb_dim, hidden_dim, linear_prop='sgc', linear_trans='lin', norm=None):
+        super(top_agg_f, self).__init__()
+
+        self.A_norm = A_norm
+        self.alpha = alpha
+        self.hop = hop
+
+        if linear_trans=='lin':
+            self.fc = nn.Linear(emb_dim, emb_dim)
+        elif linear_trans=='mlp':
+            self.fc = MLP(in_channels=emb_dim, hidden_channels=hidden_dim, out_channels=emb_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True)
+
+        self.linear_prop = linear_prop
+        self.norm = norm
+
+    def _top_filter(self, x):
+        top_filter = x
+        for _ in range(self.hop):
+            top_filter = self.alpha * torch.sparse.mm(self.A_norm, top_filter) + x
+        return top_filter
+
+    def forward(self, x):
+        x = self._top_filter(x)
+        x = self.fc(x)
+        # x = (x - x.mean(0)) / x.std(0) / torch.sqrt(torch.tensor(x.shape[1]).to(x.device))
+        if self.norm == 'l2-norm':
+            print('l2-norm')
+            x = F.normalize(x, p=2, dim=1)
+
+        
+        
+        return x
+
+
 
 
 
@@ -384,6 +422,50 @@ class attr_agg(nn.Module):
         return x
 
 
+
+
+class attr_agg_f(nn.Module):
+    def __init__(self, half_S_norm, alpha, hop, emb_dim, hidden_dim, linear_prop='sgc', linear_trans='lin', norm=None):
+        super(attr_agg_f, self).__init__()
+        ### setup the linear propagation model ###
+        self.half_S_norm = half_S_norm
+        self.alpha = alpha
+        self.hop = hop
+
+        if linear_trans=='lin':
+            self.fc = nn.Linear(emb_dim, emb_dim)
+        elif linear_trans=='mlp':
+            self.fc = MLP(in_channels=emb_dim, hidden_channels=hidden_dim, out_channels=emb_dim, num_layers=2, batch_norm=False, dropout=0.0, bias=True)
+
+        self.linear_prop = linear_prop
+        self.norm = norm
+
+
+    def _top_filter(self, x):
+        attr_filter = x
+        for _ in range(self.hop):
+            temp = self.half_S_norm.t() @ attr_filter
+            attr_filter = self.alpha * self.half_S_norm @ temp + x
+        return attr_filter
+    
+
+    def forward(self, x):
+        # x = F.normalize(x, p=2, dim=1)
+        x = self._top_filter(x)
+
+        x = self.fc(x)
+        # x = (x - x.mean(0)) / x.std(0) / torch.sqrt(torch.tensor(x.shape[1]).to(x.device))
+        if self.norm == 'l2-norm':
+            print('l2-norm')
+            x = F.normalize(x, p=2, dim=1)
+
+        
+        return x
+
+
+
+
+
 class fusion(nn.Module):
     def __init__(self, fusion_method, fusion_beta, emb_dim, fusion_norm=None):
         super(fusion, self).__init__()
@@ -431,6 +513,22 @@ class C_agg(nn.Module):
     def forward(self, C):
         return self.C_filter @ C
     
+
+
+class C_agg_f(nn.Module):
+    def __init__(self, alpha, hop, A):
+        super(C_agg_f, self).__init__()
+
+        self.alpha = alpha
+        self.hop = hop
+        self.A = A
+
+        
+    def forward(self, C):
+        C_filter = C
+        for _ in range(self.hop):
+            C_filter = self.alpha * torch.spmm(self.A, C_filter) + C
+        return C_filter
 
 
 
@@ -563,9 +661,9 @@ def node_t_neighbor_a_loss_fn(H_t, H_a, A):
     loss = F.mse_loss(H_t, H_a)
     return loss
 
-def node_t_neighbor_a_loss_fn2(H_t, H_a, A_ori):
-    A_norm = normalize_adj_torch(A_ori, self_loop=False, symmetry=False)
-    H_a = A_norm @ H_a
+def node_t_neighbor_a_loss_fn2(H_t, H_a, A_no_loop_sym):
+    # A_norm = normalize_adj_torch(A_ori, self_loop=False, symmetry=False)
+    H_a = torch.spmm(A_no_loop_sym, H_a)
     loss = F.mse_loss(H_t, H_a)
     # loss = (H_t - H_a).norm(p=2, dim=1).mean()
 
@@ -762,6 +860,7 @@ class input_enc(nn.Module):
             self.U = U
         elif self.model == 'lin' or self.model == 'mlp':
             self.U = mtx2
+        
         
 
     def forward(self):

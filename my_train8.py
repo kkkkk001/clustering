@@ -3,11 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import os, pdb, sys, argparse
-from dgc.utils import load_graph_data, normalize_adj, construct_filter, normalize_adj_torch
+from dgc.utils import load_graph_data, normalize_adj, construct_filter, normalize_adj_torch, normalize_adj_torch_sparse
 import scipy.sparse as sp
 from model import *
 from dgc.clustering import k_means
-from dgc.eval import print_eval, match_cluster
+from dgc.eval import print_eval, match_cluster, print_eval_simple
 from dgc.rand import setup_seed
 from datetime import datetime
 import time
@@ -118,6 +118,9 @@ parser.add_argument('--log_title', type=strtobool, default=True, help='')
 parser.add_argument('--save_model', type=strtobool, default=False, help='')
 
 
+parser.add_argument('--clu_check', type=int, default=1, help='')
+
+
 args = parser.parse_args()
 if args.log_file is None:
     args.log_file = 'res_log/'+args.dataset+'_grid_search.txt'
@@ -139,15 +142,21 @@ cluster_num = len(np.unique(true_labels))
 
 edge_index = torch.LongTensor(np.array(A.nonzero())).to(args.device)
 # in sparse version
-A = torch.FloatTensor(A).to(args.device)
-A_norm = normalize_adj_torch(A, self_loop=True, symmetry=True)
-A_no_loop_sym = normalize_adj_torch(A, self_loop=False, symmetry=False)
+A = torch.FloatTensor(A).to_sparse().to(args.device)
+A_norm = normalize_adj_torch_sparse(A, self_loop=True, symmetry=True)
+A_no_loop_sym = normalize_adj_torch_sparse(A, self_loop=False, symmetry=False)
 
 X = torch.FloatTensor(X).to(args.device)
 X_norm = F.normalize(X, p=2, dim=1)
 
-S = compute_attr_simi_mtx(X, args.attr_r, args.attr_bin).to(args.device)
-S_norm = normalize_adj_torch(S, self_loop=False, symmetry=True).to(args.device)
+# compute half_S_norm
+# such that half_S_norm @ half_S_norm.t() = S_norm
+deg_vec = X_norm @ X_norm.sum(0)
+deg_vec[deg_vec == 0] = 1
+deg_vec = deg_vec.pow(-0.5)
+half_S_norm = deg_vec.unsqueeze(1) * X_norm
+# 不完全相等，有精度差累积
+
 
 
 def train():
@@ -162,11 +171,8 @@ def train():
         optimizer_t.zero_grad()
         optimizer_a.zero_grad()
 
-        US_norm = model.agg(S_encoder())
-        H_t = model(US_norm)
-
-        UA_norm = attr_model.agg(A_encoder())
-        H_a = attr_model(UA_norm)
+        H_t = model(S_encoder())
+        H_a = attr_model(A_encoder())
         H = fusion_attr(H_t, H_a)
 
 
@@ -178,16 +184,16 @@ def train():
 
         loss_prop = torch.pow(1 - cos_sim(H, X_prop), args.sharpening).mean()
 
-
-        if args.rounding == 0:
-            if e == 0:
-                cluster_ids,centers_xprop = k_means(X_prop.detach().cpu(), cluster_num, device='cpu', distance='cosine')
-                cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers=centers_xprop)
+        if e%args.clu_check == 0:
+            if args.rounding == 0:
+                if e == 0:
+                    cluster_ids,centers_xprop = k_means(X_prop.detach().cpu(), cluster_num, device='cpu', distance='cosine')
+                    cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers=centers_xprop)
+                else:
+                    cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers='kmeans')
             else:
-                cluster_ids,centers = k_means(H.detach().cpu(), cluster_num, device='cpu', distance='cosine', centers='kmeans')
-        else:
-            print('rounding')
-            cluster_ids,centers = k_means((torch.round(torch.tanh(H)*7)).detach().cpu(), cluster_num, device='cpu', distance='cosine', centers='kmeans')
+                print('rounding')
+                cluster_ids,centers = k_means((torch.round(torch.tanh(H)*7)).detach().cpu(), cluster_num, device='cpu', distance='cosine', centers='kmeans')
 
 
         C0 = cluster_id2assignment(cluster_ids, cluster_num).to(args.device)
@@ -231,7 +237,7 @@ def train():
         print('epoch: %d , loss: %.3f, loss_kmeans: %.3f, loss_prop: %.3f, ort_loss: %.3f,' % (e, loss.item(), loss_kmeans.item(), loss_prop, ort_loss), end=' ')
         print('inv_loss1: %.3f, inv_loss2: %.3f, inv_loss3: %.3f,' % (inv_loss_o, inv_loss_n, inv_loss_c), end=' ')
         predict_labels = torch.argmax(C, dim=1)
-        res = print_eval(predict_labels.cpu().numpy(), true_labels, A.cpu().numpy())
+        res = print_eval_simple(predict_labels.cpu().numpy(), true_labels)
         
 
         ## best acc
@@ -268,17 +274,38 @@ for fold in [int(x) for x in args.fold.split('-')]:
     A_encoder = input_enc(args.input_encoder, X.shape[0], args.hidden_dim, args.emb_dim).to(args.device)
     # store init US_norm / UA_norm within the model 
     # for svd, use the first mtx; for lin or mlp, use the second mtx
-    S_encoder.init_U(eval(args.svd_on_S), X@X.t()) 
-    A_encoder.init_U(eval(args.svd_on_A), A)
-
+    if args.input_encoder == 'svd':
+        pre_saved_path = '/home/kxie/cluster/dataset/pre_saved_U/'+args.dataset+'/'
+        if os.path.exists(pre_saved_path+args.svd_on_S+'.pth'):
+            print('load pre-saved U')
+            S_encoder.U = torch.load(pre_saved_path+args.svd_on_S+'.pth').to(args.device)
+            A_encoder.U = torch.load(pre_saved_path+args.svd_on_A+'.pth').to(args.device)
+        else:
+            print('compute U')
+            os.makedirs(pre_saved_path, exist_ok=True)
+            X_cpu = X.cpu()
+            S = compute_attr_simi_mtx(X_cpu, args.attr_r, args.attr_bin)
+            S_norm = normalize_adj_torch(S, self_loop=False, symmetry=True)
+            S_encoder.init_U(eval(args.svd_on_S), X@X.t()) 
+            A_encoder.init_U(eval(args.svd_on_A), A)
+            S_encoder.U = S_encoder.U.to(args.device)
+            A_encoder.U = A_encoder.U.to(args.device)
+            print('save U')
+            torch.save(S_encoder.U, pre_saved_path+args.svd_on_S+'.pth')
+            torch.save(A_encoder.U, pre_saved_path+args.svd_on_A+'.pth')
+    else:
+        S_encoder.init_U(None, X@X.t()) 
+        A_encoder.init_U(None, A)
+        # S_encoder.U = S_encoder.U.to(args.device)
+        # A_encoder.U = A_encoder.U.to(args.device)
 
     #### define model and optimizer #####
-    model = top_agg(A_norm, args.top_alpha, args.top_layers, args.emb_dim, args.hidden_dim, linear_prop=args.top_prop, linear_trans=args.top_linear_trans, norm=args.fusion_norm).to(args.device)
-    attr_model = attr_agg(S_norm, args.attr_alpha, args.attr_layers, args.emb_dim, args.hidden_dim, linear_prop=args.attr_prop, linear_trans=args.attr_linear_trans, norm=args.fusion_norm).to(args.device)
+    model = top_agg_f(A_norm, args.top_alpha, args.top_layers, args.emb_dim, args.hidden_dim, linear_prop=args.top_prop, linear_trans=args.top_linear_trans, norm=args.fusion_norm).to(args.device)
+    attr_model = attr_agg_f(half_S_norm, args.attr_alpha, args.attr_layers, args.emb_dim, args.hidden_dim, linear_prop=args.attr_prop, linear_trans=args.attr_linear_trans, norm=args.fusion_norm).to(args.device)
 
     fusion_attr = fusion(args.fusion_method, args.fusion_beta, args.hidden_dim).to(args.device)
     
-    C_prop_model = C_agg(args.cprop_alpha, args.cprop_layers, A_norm).to(args.device)
+    C_prop_model = C_agg_f(args.cprop_alpha, args.cprop_layers, A_norm).to(args.device)
 
 
     optimizer_t = torch.optim.Adam(list(model.parameters())+list(S_encoder.parameters()), lr=args.t_lr, weight_decay=args.t_wd)
@@ -294,29 +321,6 @@ for fold in [int(x) for x in args.fold.split('-')]:
     X_prop = F.normalize(X_prop, p=2, dim=1)
 
 
-
-    ##### test init clustering quality #####
-    # ##### on X #####
-    # print('clustering results on initial X:\t', end=' ')
-    # cluster_ids,_ = k_means(X, cluster_num, device='cpu', distance='cosine')
-    # print_eval(cluster_ids, true_labels, A.cpu().numpy())   
-
-    # ##### on X_prop #####
-    # print('clustering results on initial X_prop:\t', end=' ')
-    # cluster_ids,centers = k_means(X_prop.detach(), cluster_num, device='cpu', distance='cosine')
-    # print_eval(cluster_ids, true_labels, A.cpu().numpy())  
-
-    # ##### on H_t #####
-    # print('clustering results on initial H_t:\t', end=' ')
-    # cluster_ids,centers = k_means((model.top_filter @ S_encoder()).detach(), cluster_num, device='cpu', distance='cosine')
-    # print_eval(cluster_ids, true_labels, A.cpu().numpy()) 
-
-    # ##### on H_a #####
-    # print('clustering results on initial H_a:\t', end=' ')
-    # cluster_ids,centers = k_means((attr_model.attr_filter @ A_encoder()).detach(), cluster_num, device='cpu', distance='cosine')
-    # print_eval(cluster_ids, true_labels, A.cpu().numpy())  
-
-
     ##### training and evaluation #####
     best_model_path = f'./best_model/{args.dataset}/'
     if not os.path.exists(best_model_path):
@@ -325,19 +329,17 @@ for fold in [int(x) for x in args.fold.split('-')]:
     res = train()
     total_res.append(res)
 
-    print('fold: %d, acc: %.2f, nmi: %.2f, ari: %.2f, f1: %.2f, mod: %.2f, con: %.2f' % (fold, res[0]*100, res[1]*100, res[2]*100, res[3]*100, res[4]*100, res[5]*100))
+    print('fold: %d, acc: %.2f, nmi: %.2f, ari: %.2f, f1: %.2f' % (fold, res[0]*100, res[1]*100, res[2]*100, res[3]*100))
 
 
 total_res = np.array(total_res)
 
 print('***** final result: *****')
-print('%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n'%(args.dataset, 
+print('%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n'%(args.dataset, 
     total_res[:, 0].mean()*100, total_res[:, 0].std()*100, 
     total_res[:, 1].mean()*100, total_res[:, 1].std()*100, 
     total_res[:, 2].mean()*100, total_res[:, 2].std()*100, 
-    total_res[:, 3].mean()*100, total_res[:, 3].std()*100, 
-    total_res[:, 4].mean()*100, total_res[:, 4].std()*100, 
-    total_res[:, 5].mean()*100, total_res[:, 5].std()*100))
+    total_res[:, 3].mean()*100, total_res[:, 3].std()*100))
 
 print(total_res)
 
@@ -356,13 +358,11 @@ with open(args.log_file, 'a+') as f:
         f.write(', '.join(x for x in args_keys)+'\n')
     f.write(', '.join([str(x) for x in [args.input_encoder, args.top_linear_trans, args.fusion_norm, args.norm, args.clu_size]])+', ')
     f.write(', '.join([str(x) for x in [args.top_layers, args.attr_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3, args.fusion_beta]])+', ')
-    f.write('%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, '%(args.dataset, 
+    f.write('%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, '%(args.dataset, 
         total_res[:, 0].mean()*100, total_res[:, 0].std()*100, 
         total_res[:, 1].mean()*100, total_res[:, 1].std()*100, 
         total_res[:, 2].mean()*100, total_res[:, 2].std()*100, 
-        total_res[:, 3].mean()*100, total_res[:, 3].std()*100, 
-        total_res[:, 4].mean()*100, total_res[:, 4].std()*100, 
-        total_res[:, 5].mean()*100, total_res[:, 5].std()*100, total_time))
+        total_res[:, 3].mean()*100, total_res[:, 3].std()*100, total_time))
     f.write(', '.join(x for x in args_values)+'\n')
     
 
@@ -377,8 +377,8 @@ with open(args.log_fold_file, 'a+') as f:
     for i in range(total_res.shape[0]):
         f.write(', '.join([str(x) for x in [args.top_layers, args.attr_layers, args.top_alpha, args.attr_alpha, args.loss_lambda_SSG0, args.loss_lambda_SSG1, args.loss_lambda_SSG2, args.loss_lambda_SSG3, args.fusion_beta]])+', ')
         f.write(', '.join([str(x) for x in [args.input_encoder, args.top_linear_trans, args.fusion_norm, args.norm, args.clu_size]])+', ')
-        f.write('%s, %d, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, '%(args.dataset, i, 
-            total_res[i, 0]*100, total_res[i, 1]*100, total_res[i, 2]*100, total_res[i, 3]*100, total_res[i, 4]*100, total_res[i, 5]*100, total_time))
+        f.write('%s, %d, %.2f, %.2f, %.2f, %.2f, %.2f, '%(args.dataset, i, 
+            total_res[i, 0]*100, total_res[i, 1]*100, total_res[i, 2]*100, total_res[i, 3]*100, total_time))
         f.write(', '.join(x for x in args_values)+'\n')
 
 

@@ -7,6 +7,8 @@ import logging
 import numpy as np
 import scipy.sparse as sp
 from torch_geometric.datasets import Planetoid, TUDataset, KarateClub, WikipediaNetwork, WebKB, AttributedGraphDataset
+from ogb.nodeproppred import NodePropPredDataset
+
 
 
 def load_graph_data(root_path=".", dataset_name="dblp", show_details=False):
@@ -47,13 +49,21 @@ def load_graph_data(root_path=".", dataset_name="dblp", show_details=False):
             data = AttributedGraphDataset(root=root_path+'pyg', name='BlogCatalog')
         elif dataset_name == 'pubmed':
             data = Planetoid(root=root_path+'pyg', name='PubMed')
+        elif dataset_name == 'arxiv':
+            data = NodePropPredDataset(name='ogbn-arxiv', root=root_path+'pyg')
         else:
             raise NotImplementedError("The dataset is not supported")
         data = data[0]
 
-        feat = data.x.to_dense().numpy()
-        label = data.y.numpy()
-        adj_idx = data.edge_index.numpy()
+        if dataset_name == 'arxiv':
+            graph, label = data
+            label = label.flatten()
+            feat = graph['node_feat']
+            adj_idx = graph['edge_index']
+        else:
+            feat = data.x.to_dense().numpy()
+            label = data.y.numpy()
+            adj_idx = data.edge_index.numpy()
         adj_sp = sp.coo_matrix((np.ones(adj_idx.shape[1]), (adj_idx[0], adj_idx[1])), shape=(feat.shape[0], feat.shape[0]))
         adj = adj_sp.toarray()
 
