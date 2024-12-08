@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-# @Author  : Yue Liu
-# @Email   : yueliu19990731@163.com
-# @Time    : 2022/9/21 0:38
+
 
 import torch
 import numpy as np
@@ -93,6 +91,59 @@ def normalize_adj_torch(adj, self_loop=True, symmetry=True):
 
     return norm_adj
 
+
+import torch
+
+def add_self_loops(adj):
+    # 获取稀疏矩阵的索引和数据
+    indices = adj._indices()
+    values = adj._values()
+    
+    # 创建自环的索引和数据
+    num_nodes = adj.size(0)
+    self_loop_indices = torch.arange(0, num_nodes, device=adj.device, dtype=torch.long).unsqueeze(0).repeat(2, 1)
+    self_loop_values = torch.ones(num_nodes, device=adj.device)
+    
+    # 合并原始索引和自环索引
+    new_indices = torch.cat([indices, self_loop_indices], dim=1)
+    new_values = torch.cat([values, self_loop_values])
+    
+    # 创建新的稀疏矩阵
+    new_adj = torch.sparse_coo_tensor(new_indices, new_values, adj.size(), device=adj.device)
+    
+    return new_adj
+
+def normalize_adj_torch_sparse(adj, self_loop=True, symmetry=True):
+    """
+    normalize the adj matrix (torch sparse version)
+    :param adj: input adj matrix (torch sparse tensor)
+    :param self_loop: if add the self loop or not
+    :param symmetry: symmetry normalize or not
+    :return norm_adj: the normalized adj matrix
+    """
+    # add the self_loop
+    if self_loop:
+        adj = add_self_loops(adj)
+        # adj = adj + torch.eye(adj.shape[0], device=adj.device).to_sparse()
+
+
+    # calculate degree matrix and its inverse matrix
+    deg_vec = torch.sparse.sum(adj, dim=0).to_dense()
+    deg_vec[deg_vec == 0] = 1
+
+    # symmetry normalize: D^{-0.5} A D^{-0.5}
+    if symmetry:
+        deg_vec = deg_vec.pow(-0.5)
+        D_inv_sqrt = torch.diag(deg_vec)
+        norm_adj = torch.sparse.mm(torch.sparse.mm(D_inv_sqrt.to_sparse(), adj), D_inv_sqrt.to_sparse())
+
+    # non-symmetry normalize: D^{-1} A
+    else:
+        deg_vec = deg_vec.pow(-1)
+        D_inv = torch.diag(deg_vec)
+        norm_adj = torch.sparse.mm(D_inv.to_sparse(), adj)
+
+    return norm_adj
 
 
 

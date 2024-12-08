@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-# @Author  : Yue Liu
-# @Email   : yueliu19990731@163.com
-# @Time    : 2022/9/21 0:56
+
 import numpy as np
 from munkres import Munkres
 from sklearn.metrics import accuracy_score, f1_score
@@ -146,3 +144,21 @@ def print_eval(y_pred, y_true, A):
 
 	print('acc: %.2f, nmi: %.2f, ari: %.2f, f1: %.2f, mod: %.2f, con: %.2f' % (acc*100, nmi*100, ari*100, f1*100, mod*100, con*100))
 	return [acc, nmi, ari, f1, mod, con]
+
+
+def print_eval_simple(y_pred, y_true):
+	# no modularity and conductance
+	# no need to pass A
+
+	# all cluster_ids, true_labels, A are numpy arrays
+	nmi = nmi_score(y_true, y_pred, average_method='arithmetic')
+	ari = ari_score(y_true, y_pred)
+
+	new_pred = match_cluster(y_true, y_pred)
+	# print(new_pred)
+
+	acc = accuracy_score(y_true, new_pred)
+	f1 = f1_score(y_true, new_pred, average='macro')
+
+	print('acc: %.2f, nmi: %.2f, ari: %.2f, f1: %.2f' % (acc*100, nmi*100, ari*100, f1*100))
+	return [acc, nmi, ari, f1]

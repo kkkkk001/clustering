@@ -13,8 +13,8 @@ from datetime import datetime
 import time
 from distutils.util import strtobool
 import sys
-sys.path.insert(0, '/home/kxie/cluster/DeProp')
-from DeProp.model import DeProp
+# sys.path.insert(0, './DeProp')
+# from DeProp.model import DeProp
 setup_seed(42)
 torch.autograd.set_detect_anomaly(True)
 start_time = time.time()
@@ -132,14 +132,16 @@ for key, value in vars(args).items():
     args_values.append(str(value))
 
 ##### load data #####
-X, true_labels, A = load_graph_data(root_path='/home/kxie/cluster/dataset/', 
+X, true_labels, A = load_graph_data(root_path='./dataset/', 
                           dataset_name=args.dataset, show_details=True)
 cluster_num = len(np.unique(true_labels))
 
 
 edge_index = torch.LongTensor(np.array(A.nonzero())).to(args.device)
+# in sparse version
 A = torch.FloatTensor(A).to(args.device)
 A_norm = normalize_adj_torch(A, self_loop=True, symmetry=True)
+A_no_loop_sym = normalize_adj_torch(A, self_loop=False, symmetry=False)
 
 X = torch.FloatTensor(X).to(args.device)
 X_norm = F.normalize(X, p=2, dim=1)
@@ -165,7 +167,6 @@ def train():
 
         UA_norm = attr_model.agg(A_encoder())
         H_a = attr_model(UA_norm)
-
         H = fusion_attr(H_t, H_a)
 
 
@@ -214,7 +215,7 @@ def train():
         # inv_loss_o = args.loss_lambda_SSG1 * (H_t_norm - H_a_norm).pow(2).sum()
         inv_loss_o = F.mse_loss(H_t_norm, H_a_norm)
         # inv_loss_o = args.loss_lambda_SSG1 * (H_t_norm - H_a_norm).norm(p=2, dim=1).mean()
-        inv_loss_n = (node_t_neighbor_a_loss_fn2(H_t_norm, H_a_norm, A_ori=A) + node_t_neighbor_a_loss_fn2(H_a_norm, H_t_norm, A_ori=A))
+        inv_loss_n = (node_t_neighbor_a_loss_fn2(H_t_norm, H_a_norm, A_no_loop_sym) + node_t_neighbor_a_loss_fn2(H_a_norm, H_t_norm, A_no_loop_sym))
         # print(C.sum(0).mean(), C.sum(0).max())
         inv_loss_c = (node_t_cluster_a_loss_fn2(H_t_norm, H_a_norm, C, clu_size=args.clu_size) + node_t_cluster_a_loss_fn2(H_a_norm, H_t_norm, C, clu_size=args.clu_size))
         inv_loss = args.loss_lambda_SSG1 * inv_loss_o + args.loss_lambda_SSG2 * inv_loss_n + args.loss_lambda_SSG3 * inv_loss_c
@@ -317,7 +318,7 @@ for fold in [int(x) for x in args.fold.split('-')]:
 
 
     ##### training and evaluation #####
-    best_model_path = f'/home/kxie/cluster/best_model/{args.dataset}/'
+    best_model_path = f'./best_model/{args.dataset}/'
     if not os.path.exists(best_model_path):
         os.makedirs(best_model_path)
     best_model_path += f'fold{fold}_'

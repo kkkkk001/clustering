@@ -1,19 +1,14 @@
-link to datasets: https://drive.google.com/file/d/1J5IuMV40CETvOs0wS3HqI0929laU22G0/view?usp=sharing
-Please download and put the folders of datasets in cluster/dataset, e.g., cluster/dataset/cora/
+## Clustering 
+To reproduce the results in the paper, please run the my_train7.py file, The hyperparameters required for each datasets are listed in Table 7. An example script on Texas graph are given. 
 
-test dmon with GCN encoder:
+Run the following command to cluster Texas graph: 
 
-python test_dmon.py --encoder GCN
-
-test dmon with our low pass filter encoder:
-
-python test_dmon.py --encoder low_pass
+```
+bash texas_script.sh
+```
 
 
-test DGCluster:
+## Datasets 
+Cora, Citeseer, Cornell and Texas datasets are included in dataset/ path. 
+For other 8 datasets included in the paper, we load from torch_geometric.
 
-cd DGClustter
-
-python mian.py --dataset cora --device cuda:0 --lam 0 --encoder GCN
-
-python mian.py --dataset cora --device cuda:0 --lam 0 --encoder low_pass

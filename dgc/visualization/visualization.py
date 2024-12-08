@@ -2,9 +2,7 @@
 # matplotlib ipympl
 
 # -*- coding: utf-8 -*-
-# @Author  : Yue Liu
-# @Email   : yueliu19990731@163.com
-# @Time    : 2021/11/25 11:11
+
 import pdb
 import numpy as np
 import seaborn as sns
@@ -50,7 +48,7 @@ def t_sne(embeds, labels, sample_index, show_fig=True, norm=True):
     for i in range(norm_ts_embeds.shape[0]):
         plt.scatter(norm_ts_embeds[i, 0], norm_ts_embeds[i, 1],
                     color=plt.cm.Set1(sample_labels[i] % 7),
-                    s=10)  # s 参数设置点的大小
+                    s=10)  
         # plt.text(norm_ts_embeds[i, 0], norm_ts_embeds[i, 1], str(sample_labels[i]),
         #          color=plt.cm.Set1(sample_labels[i] % 7),
         #          fontdict={'weight': 'bold', 'size': 7})

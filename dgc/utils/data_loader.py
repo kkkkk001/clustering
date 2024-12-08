@@ -1,7 +1,4 @@
 # -*- coding: utf-8 -*-
-# @Author  : Yue Liu
-# @Email   : yueliu19990731@163.com
-# @Time    : 2021/11/25 11:11
 
 import os
 import sys
@@ -10,6 +7,8 @@ import logging
 import numpy as np
 import scipy.sparse as sp
 from torch_geometric.datasets import Planetoid, TUDataset, KarateClub, WikipediaNetwork, WebKB, AttributedGraphDataset
+from ogb.nodeproppred import NodePropPredDataset
+
 
 
 def load_graph_data(root_path=".", dataset_name="dblp", show_details=False):
@@ -32,7 +31,7 @@ def load_graph_data(root_path=".", dataset_name="dblp", show_details=False):
         level=logging.INFO,
         stream=sys.stdout)
     dataset_path = root_path + dataset_name
-    if os.path.exists(dataset_path):
+    if dataset_name!='pubmed' and os.path.exists(dataset_path):
         logging.info("Loading " + dataset_name + " dataset from local")
         load_path = root_path + dataset_name + "/" + dataset_name
         feat = np.load(load_path+"_feat.npy", allow_pickle=True)
@@ -48,13 +47,23 @@ def load_graph_data(root_path=".", dataset_name="dblp", show_details=False):
             data = AttributedGraphDataset(root=root_path+'pyg', name='Flickr')
         elif dataset_name == 'blogcatalog':
             data = AttributedGraphDataset(root=root_path+'pyg', name='BlogCatalog')
+        elif dataset_name == 'pubmed':
+            data = Planetoid(root=root_path+'pyg', name='PubMed')
+        elif dataset_name == 'arxiv':
+            data = NodePropPredDataset(name='ogbn-arxiv', root=root_path+'pyg')
         else:
             raise NotImplementedError("The dataset is not supported")
         data = data[0]
 
-        feat = data.x.to_dense().numpy()
-        label = data.y.numpy()
-        adj_idx = data.edge_index.numpy()
+        if dataset_name == 'arxiv':
+            graph, label = data
+            label = label.flatten()
+            feat = graph['node_feat']
+            adj_idx = graph['edge_index']
+        else:
+            feat = data.x.to_dense().numpy()
+            label = data.y.numpy()
+            adj_idx = data.edge_index.numpy()
         adj_sp = sp.coo_matrix((np.ones(adj_idx.shape[1]), (adj_idx[0], adj_idx[1])), shape=(feat.shape[0], feat.shape[0]))
         adj = adj_sp.toarray()
 
