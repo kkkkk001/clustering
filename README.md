@@ -19,7 +19,7 @@ The test environment are recorded in *environment.yml*. We recommond install wit
 | BAT | 131 | 1038 | 81 | 4 | 0.45 |
 | UAT | 1190 | 13599 | 239 | 4 | 0.698 |
 
-We have include Texas, Cornell, Cora, and Citeseer datasets under *dataset/* directory for test. Other datasets can be loaded from torch_geometric. 
+We have include Texas, Cornell, Cora, Citeseer, BAT and UAT datasets under *dataset/* directory for test. Other datasets can be loaded from torch_geometric. 
 
 
 ### Running code
