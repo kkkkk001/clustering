@@ -31,7 +31,7 @@ def load_graph_data(root_path=".", dataset_name="dblp", show_details=False):
         level=logging.INFO,
         stream=sys.stdout)
     dataset_path = root_path + dataset_name
-    if dataset_name!='pubmed' and os.path.exists(dataset_path):
+    if os.path.exists(dataset_path):
         logging.info("Loading " + dataset_name + " dataset from local")
         load_path = root_path + dataset_name + "/" + dataset_name
         feat = np.load(load_path+"_feat.npy", allow_pickle=True)
